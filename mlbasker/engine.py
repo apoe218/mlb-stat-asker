@@ -28,7 +28,8 @@ RESULT_RE = re.compile(r"\b(score|scores|result|results|box score|who won|beat|d
                        r"game (yesterday|last night)|play(ed)? (yesterday|last night)|last game)\b")
 STANDINGS_RE = re.compile(r"standings|games back|\bgb\b|division (lead|race)|wild[- ]card (race|standings)|"
                           r"how (are|is|have) (the )?.{1,30}(doing|been)|\brecord\b|\bwhat place\b")
-LEADERS_RE = re.compile(r"\blead(s|er|ers|ing)?\b|\btop \d+\b|who (has|had) the (most|best|highest|lowest|fewest)|"
+SEASON_RECAP_RE = re.compile(r"how (did|have|do) (the )?.{1,40}?\b(do|finish|fare|perform|end up)\b")
+LEADERS_RE = re.compile(r"\bled?\b|\blead(s|er|ers|ing)?\b|\btop \d+\b|who (has|had) the (most|best|highest|lowest|fewest)|"
                         r"\bbest .{1,30} in (the )?(al|nl|american league|national league|league|mlb|majors|baseball)|"
                         r"\b(in|for) the (al|nl|american league|national league)\b|\bmost .{1,25} (in|across) (the )?(league|mlb|majors|baseball)")
 
@@ -63,8 +64,12 @@ class Asker:
 
         stats = Stats(self.client, entities, cutoff)
         parsed = parse(q, cutoff)
-        teams, _ = entities.find_teams(q)
+        teams, _ = entities.find_teams(q, seasons=(parsed.season_from, parsed.season_to))
 
+        # "how did the 1955 Dodgers do" is about a season, not a single game
+        if SEASON_RECAP_RE.search(ql) and teams and stats._target_date(q) is None \
+                and not re.search(r"game|last night|yesterday", ql):
+            return stats.standings(q, parsed, teams)
         if RESULT_RE.search(ql) and (teams or re.search(r"yesterday|last night|tonight|today|tomorrow|scores", ql)
                                       or stats._target_date(q)):
             return stats.results(q, teams)

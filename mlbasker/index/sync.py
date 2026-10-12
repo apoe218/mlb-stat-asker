@@ -9,10 +9,11 @@ from typing import Callable
 from ..client import BASE_11, MlbClient, TTL_LONG
 from ..cutoff import cutoff_date
 from .db import has_fts
-from .extract import FEED_FIELDS, extract_game
+from .extract import FEED_FIELDS, extract_game, score_only
 
 GAME_TYPES = "R,F,D,L,W"   # regular season + postseason rounds; no spring training / All-Star
-FIRST_PBP_SEASON = 2008    # earliest seasons with reliable play-by-play in the live feed
+FIRST_SEASON = 1876        # earliest season in the API: score-level rows from here
+FIRST_PBP_SEASON = 1950    # earliest season with play-by-play (1949 and before: none; checked)
 
 
 def _chunks(start: date, end: date, days: int = 30):
@@ -34,11 +35,28 @@ def season_bounds(client: MlbClient, season: int) -> tuple[date, date] | None:
     return start, end
 
 
+def _team_name(team: dict) -> str:
+    # a few early Negro-league teams come back with an id but no name
+    return team.get("name") or f"Team {team['id']}"
+
+
+def _schedule_meta(g: dict, day: str) -> dict:
+    away, home = g["teams"]["away"], g["teams"]["home"]
+    innings = len((g.get("linescore") or {}).get("innings") or []) or None
+    return {"game_pk": g["gamePk"], "date": g.get("officialDate", day),
+            "season": int(g["season"]), "game_type": g["gameType"],
+            "league": (home["team"].get("league") or {}).get("name"),
+            "away_id": away["team"]["id"], "away": _team_name(away["team"]),
+            "home_id": home["team"]["id"], "home": _team_name(home["team"]),
+            "away_score": away.get("score"), "home_score": home.get("score"),
+            "innings": innings, "venue": (g.get("venue") or {}).get("name")}
+
+
 def final_games(client: MlbClient, start: date, end: date) -> list[dict]:
     games: list[dict] = []
     for a, b in _chunks(start, end):
-        data = client.get("schedule", {"sportId": 1, "startDate": a.isoformat(),
-                                       "endDate": b.isoformat(), "gameType": GAME_TYPES},
+        data = client.get("schedule", {"sportId": 1, "startDate": a.isoformat(), "endDate": b.isoformat(),
+                                       "gameType": GAME_TYPES, "hydrate": "team,linescore"},
                           ttl=TTL_LONG if b < cutoff_date() - timedelta(days=3) else 300)
         for d in data.get("dates", []):
             for g in d.get("games", []):
@@ -46,9 +64,12 @@ def final_games(client: MlbClient, start: date, end: date) -> list[dict]:
                     continue
                 if g.get("gameType") not in GAME_TYPES.split(","):
                     continue
-                games.append({"game_pk": g["gamePk"], "date": g.get("officialDate", d["date"]),
-                              "season": int(g["season"]), "game_type": g["gameType"]})
-    return games
+                try:
+                    games.append(_schedule_meta(g, d["date"]))
+                except (KeyError, TypeError):
+                    continue    # one malformed schedule row must not abort a whole backfill
+    seen: set[int] = set()
+    return [g for g in games if not (g["game_pk"] in seen or seen.add(g["game_pk"]))]
 
 
 def _fetch(client: MlbClient, meta: dict) -> tuple[dict, dict | None]:
@@ -80,14 +101,31 @@ def _clear_game(con: sqlite3.Connection, game_pk: int) -> None:
 
 
 def sync_range(con: sqlite3.Connection, client: MlbClient, start: date, end: date, *,
-               workers: int = 8, progress: Callable[[str], None] = print) -> dict:
-    """Index every finished game in [start, end] (capped at the cutoff) not yet indexed."""
+               workers: int = 8, progress: Callable[[str], None] = print,
+               play_by_play: bool = True) -> dict:
+    """Index every finished game in [start, end] (capped at the cutoff) not yet indexed.
+
+    Seasons before FIRST_PBP_SEASON have no play-by-play, so they get score-level rows only.
+    """
     end = min(end, cutoff_date())
     if start > end:
-        return {"indexed": 0, "skipped": 0, "failed": 0}
-    known = {r[0] for r in con.execute("SELECT game_pk FROM games")}
-    todo = [g for g in final_games(client, start, end) if g["game_pk"] not in known]
-    stats = {"indexed": 0, "skipped": len(known), "failed": 0}
+        return {"indexed": 0, "score_only": 0, "skipped": 0, "failed": 0}
+    known = {r[0]: r[1] for r in con.execute("SELECT game_pk, league IS NULL FROM games")}
+    games = final_games(client, start, end)
+    stats = {"indexed": 0, "score_only": 0, "skipped": 0, "failed": 0}
+
+    todo = []
+    for g in games:
+        if g["game_pk"] in known:
+            stats["skipped"] += 1
+            if known[g["game_pk"]]:       # indexed before leagues were recorded: fill it in
+                con.execute("UPDATE games SET league = ? WHERE game_pk = ?", (g["league"], g["game_pk"]))
+            continue
+        if play_by_play and g["season"] >= FIRST_PBP_SEASON:
+            todo.append(g)
+        else:
+            _write(con, {"game": score_only(g), "plays": [], "outs": [], "defensive": [], "players": {}})
+            stats["score_only"] += 1
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for i, (meta, feed) in enumerate(pool.map(lambda m: _fetch(client, m), todo), 1):
             if feed is None:
@@ -112,13 +150,15 @@ def rebuild_fts(con: sqlite3.Connection) -> None:
 
 def sync_seasons(con: sqlite3.Connection, client: MlbClient, first: int, last: int, *,
                  workers: int = 8, progress: Callable[[str], None] = print) -> None:
-    for season in range(first, last + 1):
+    for season in range(last, first - 1, -1):      # newest first: recent questions work early
         b = season_bounds(client, season)
         if not b:
             continue
         start, end = b
         row = con.execute("SELECT synced_through FROM sync_state WHERE season=?", (season,)).fetchone()
-        if row:  # resume after what was already indexed
+        needs_backfill = con.execute("SELECT 1 FROM games WHERE season = ? AND league IS NULL LIMIT 1",
+                                     (season,)).fetchone()
+        if row and not needs_backfill:  # resume after what was already indexed
             start = max(start, date.fromisoformat(row[0]) - timedelta(days=2))
         if start > cutoff_date():
             continue
@@ -140,7 +180,11 @@ def sync_recent(con: sqlite3.Connection, client: MlbClient, days: int = 7, **kw)
 
 
 def coverage(con: sqlite3.Connection) -> dict:
+    """`games`/`from`/`to` describe play-by-play rows; `all_*` include score-level rows."""
     row = con.execute("SELECT COUNT(*) n, MIN(date) a, MAX(date) b, MIN(season) s0, MAX(season) s1 "
                       "FROM games WHERE has_pbp = 1").fetchone()
+    allr = con.execute("SELECT COUNT(*) n, MIN(season) s0, MAX(season) s1, MAX(date) b FROM games").fetchone()
     return {"games": row["n"], "from": row["a"], "to": row["b"],
-            "first_season": row["s0"], "last_season": row["s1"]}
+            "first_season": row["s0"], "last_season": row["s1"],
+            "all_games": allr["n"], "all_first_season": allr["s0"], "all_last_season": allr["s1"],
+            "all_to": allr["b"]}

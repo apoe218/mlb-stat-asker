@@ -41,6 +41,18 @@ PIT_LINE = [("gamesPlayed", "G"), ("wins", "W"), ("losses", "L"), ("era", "ERA")
             ("inningsPitched", "IP"), ("strikeOuts", "SO"), ("whip", "WHIP")]
 
 
+LEGACY_LEAGUES = {103: "American League", 104: "National League"}
+PBP_START = 1950
+
+
+def era_note(first_season: int | None) -> str:
+    """A caveat for seasons whose records are thinner than the modern game's."""
+    if first_season is not None and first_season < PBP_START:
+        return (f" Before {PBP_START} there is no play-by-play, and some stats weren't officially "
+                f"tracked, so totals can be missing or incomplete.")
+    return ""
+
+
 def find_stat(q: str):
     for row in STATS:
         if re.search(row[0], q):
@@ -107,11 +119,29 @@ class Stats:
         if stat is None:
             group = "pitching" if (pos == "P" or pitching_words) else "hitting"
 
-        params = {"stats": "byDateRange", "group": group, "startDate": start.isoformat(),
-                  "endDate": end.isoformat(), "gameType": self._game_types(parsed)}
-        if not career:
-            params["season"] = parsed.season_from if parsed.season_from is not None else season_of(self.cutoff)
-        data = self.client.get(f"people/{player.id}/stats", params, ttl=self._ttl(end))
+        cur = season_of(self.cutoff)
+        season = parsed.season_from if parsed.season_from is not None else cur
+        single_past = (not career and season == (parsed.season_to if parsed.season_to is not None else season)
+                       and season < cur)
+        retired = False
+        if career:
+            prof = self.entities.profile(player)
+            retired = prof["active"] is False or (prof["debut_year"] or 9999) < 1901
+        if single_past or retired:
+            # a finished season (or a retired player's career) can't change, and the by-date endpoint
+            # has nothing before 1901; season/career totals are exact and cover all of history
+            params = {"stats": "career" if career else "season", "group": group,
+                      "gameType": self._game_types(parsed)}
+            if not career:
+                params["season"] = season
+            ttl = TTL_LONG
+        else:
+            params = {"stats": "byDateRange", "group": group, "startDate": start.isoformat(),
+                      "endDate": end.isoformat(), "gameType": self._game_types(parsed)}
+            if not career:
+                params["season"] = season
+            ttl = self._ttl(end)
+        data = self.client.get(f"people/{player.id}/stats", params, ttl=ttl)
         split = self._split(data)
         gt = "" if self._game_types(parsed) == "R" else " (postseason)"
         if not split:
@@ -126,20 +156,22 @@ class Stats:
         if career:
             gt = " (regular season)" if self._game_types(parsed) == "R" else gt
 
+        has, is_ = ("had", "was") if single_past else ("has", "is")     # finished seasons read in past tense
         if stat and stat[1] in st:
             val = st[stat[1]]
             if stat[1] == "wins":
                 val = f"{st['wins']}–{st['losses']}"
-                text = f"{player.name} is **{val}** in the {label}{gt}{where}."
+                text = f"{player.name} {is_} **{val}** in the {label}{gt}{where}."
             else:
-                text = f"{player.name} has **{val} {stat[2]}** in the {label}{gt}{where}."
+                text = f"{player.name} {has} **{val} {stat[2]}** in the {label}{gt}{where}."
                 if stat[1] in ("avg", "obp", "slg", "ops", "era", "whip"):
-                    text = f"{player.name}'s {stat[2]} is **{val}** in the {label}{gt}{where}."
+                    text = f"{player.name}'s {stat[2]} {is_} **{val}** in the {label}{gt}{where}."
                 if career:
                     text = f"{player.name}'s career total{gt}: **{val} {stat[2]}**."
         else:
             text = f"Here's {player.name}'s {group} line for the {label}{gt}{where}:"
-        return Answer(text, cols, [row], through(self.cutoff))
+        first = parsed.season_from if parsed.season_from is not None else (None if career else season_of(self.cutoff))
+        return Answer(text, cols, [row], through(self.cutoff) + era_note(1876 if career else first))
 
     # --- leaders ----------------------------------------------------------------------
     def leaders(self, q: str, parsed: Parsed, teams: list[Team]) -> Answer:
@@ -156,33 +188,38 @@ class Stats:
         m = re.search(r"top (\d+)", ql)
         if m:
             n = max(1, min(int(m.group(1)), 25))
-        if re.search(r"\bwho (leads|has the most|is leading|has the best)|\bleader\b", ql) and not m and \
-                not re.search(r"leaders|top", ql):
-            n = 1 if not rate else 1
+        if re.search(r"\bwho (leads|led|has the most|had the most|is leading|was leading|has the best|had the best)"
+                     r"|\bwho'?s leading|\b(the )?leader\b", ql) and not m and not re.search(r"leaders|top", ql):
+            n = 1
         start, end, wlabel = self.window(parsed)
-        params = {"stats": "byDateRange", "group": group, "playerPool": "qualified" if rate else "all",
-                  "sportId": 1, "startDate": start.isoformat(), "endDate": end.isoformat(),
-                  "season": parsed.season_from if parsed.season_from is not None else season_of(self.cutoff),
+        season = parsed.season_from if parsed.season_from is not None else season_of(self.cutoff)
+        finished = season < season_of(self.cutoff) and (parsed.season_to in (None, season))
+        params = {"stats": "season" if finished else "byDateRange", "group": group,
+                  "playerPool": "qualified" if rate else "all", "sportId": 1, "season": season,
                   "sortStat": sort, "order": "asc" if asc else "desc", "limit": n * 3 if teams else n,
                   "gameType": self._game_types(parsed)}
+        if not finished:
+            params.update({"startDate": start.isoformat(), "endDate": end.isoformat()})
         if teams:
             params["teamId"] = ",".join(str(t.id) for t in teams)
         if league:
             params["leagueIds"] = league
-        data = self.client.get("stats", params, ttl=self._ttl(end))
+        data = self.client.get("stats", params, ttl=TTL_LONG if finished else self._ttl(end))
         splits = (data.get("stats") or [{}])[0].get("splits", [])[:n]
         if not splits:
             return Answer(f"I couldn't find leaders for {label} in the {wlabel}.", footnote=through(self.cutoff))
         rows = [[i + 1, s["player"]["fullName"], (s.get("team") or {}).get("name", ""), str(s["stat"].get(field, "—"))]
                 for i, s in enumerate(splits)]
+        note = through(self.cutoff) + (" Rate stats use qualified players only." if rate else "") + \
+            era_note(parsed.season_from if parsed.season_from is not None else season_of(self.cutoff))
         top = rows[0]
         scope = f" for the {teams[0].short}" if teams else (" in the AL" if league == 103 else " in the NL" if league == 104 else "")
         if n == 1:
-            return Answer(f"**{top[1]}** ({top[2]}) leads{scope} in {label} in the {wlabel} with **{top[3]}**.",
-                          ["#", "Player", "Team", label[:1].upper() + label[1:]], rows, through(self.cutoff) +
-                          (" Rate stats use qualified players only." if rate else ""))
-        return Answer(f"{label[:1].upper() + label[1:]} leaders{scope}, {wlabel}:", ["#", "Player", "Team", label[:1].upper() + label[1:]], rows,
-                      through(self.cutoff) + (" Rate stats use qualified players only." if rate else ""))
+            past = (parsed.season_from if parsed.season_from is not None else season_of(self.cutoff)) < season_of(self.cutoff)
+            return Answer(f"**{top[1]}** ({top[2]}) {'led' if past else 'leads'}{scope} in {label} in the {wlabel} with **{top[3]}**.",
+                          ["#", "Player", "Team", label[:1].upper() + label[1:]], rows, note)
+        return Answer(f"{label[:1].upper() + label[1:]} leaders{scope}, {wlabel}:",
+                      ["#", "Player", "Team", label[:1].upper() + label[1:]], rows, note)
 
     # --- standings --------------------------------------------------------------------
     def standings(self, q: str, parsed: Parsed, teams: list[Team]) -> Answer:
@@ -204,7 +241,7 @@ class Stats:
                     if tr["team"]["id"] == t.id:
                         name = self._division_name(r)
                         gb = tr.get("gamesBack", "-")
-                        rank = tr.get("divisionRank", "?")
+                        rank = tr.get("divisionRank") or tr.get("leagueRank", "?")
                         extra = "" if gb in ("-", "0.0") else f", {gb} GB"
                         text = (f"The {t.short} {'finished' if final else 'are'} **{tr['wins']}–{tr['losses']}** "
                                 f"({tr.get('winningPercentage', '')}), #{rank} in the {name}{extra} — {season} {suffix}.")
@@ -222,22 +259,27 @@ class Stats:
         return Answer(f"{season} {suffix}:", ["Division", "Team", "W", "L", "PCT", "GB"], rows, through(self.cutoff))
 
     def _division_name(self, record: dict) -> str:
-        div = record.get("division", {})
-        if "name" in div:
+        """Division name; before 1969 there were none, so fall back to the league."""
+        div = record.get("division") or {}
+        if div.get("name"):
             return div["name"]
-        d = self.client.get(f"divisions/{div.get('id')}", ttl=TTL_LONG)["divisions"][0]
-        return d["name"]
+        try:
+            if div.get("id"):
+                return self.client.get(f"divisions/{div['id']}", ttl=TTL_LONG)["divisions"][0]["name"]
+        except Exception:
+            pass
+        return LEGACY_LEAGUES.get((record.get("league") or {}).get("id"), "League")
 
     # --- game results -----------------------------------------------------------------
     def _target_date(self, q: str) -> date | None:
         ql = q.lower()
         if re.search(r"yesterday|last night", ql):
             return self.cutoff
-        m = re.search(r"\b(20\d\d)-(\d\d)-(\d\d)\b", q)
+        m = re.search(r"\b(1[89]\d\d|20\d\d)-(\d\d)-(\d\d)\b", q)
         if m:
             return date(int(m[1]), int(m[2]), int(m[3]))
         months = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
-        m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(20\d\d))?", ql)
+        m = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(1[89]\d\d|20\d\d))?", ql)
         if m:
             mon, day = months[m[1]], int(m[2])
             year = int(m[3]) if m[3] else self.cutoff.year
@@ -245,7 +287,7 @@ class Stats:
             if d > self.cutoff and not m[3]:
                 d = date(year - 1, mon, day)
             return d
-        m = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", ql)
+        m = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{4}|\d{2}))?\b", ql)
         if m:
             year = int(m[3]) if m[3] else self.cutoff.year
             year += 2000 if year < 100 else 0
@@ -261,6 +303,9 @@ class Stats:
             return Answer(f"I only use completed games through {pretty_date(self.cutoff.isoformat())} — "
                           f"nothing from today or the future.", footnote=through(self.cutoff))
         d = self._target_date(q)
+        if d and d.year < 1901:
+            return Answer("The API has game scores only from 1901. For earlier years I can give "
+                          "standings, season stats and leaders.", footnote=through(self.cutoff))
         if d and d > self.cutoff:
             return Answer(f"That date is past my cutoff. I only have games through "
                           f"{pretty_date(self.cutoff.isoformat())}.", footnote=through(self.cutoff))

@@ -41,3 +41,10 @@ def test_everyday_events_stay_player_stats():
 def test_multi_out_vs_game_ending():
     assert kind("list all unassisted triple plays") == "multi_out"
     assert kind("game-ending double plays") == "game_end"
+
+
+def test_single_season_is_not_a_single_game_record():
+    assert match("who has the most home runs in a single season") is None
+    assert match("most home runs in a single season 1927") is None
+    assert match("most strikeouts in a single game")[0] == "single_game_record"
+    assert match("most home runs in a game")[1] == {"stat": "home runs"}

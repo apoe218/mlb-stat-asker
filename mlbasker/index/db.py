@@ -13,11 +13,12 @@ CREATE TABLE IF NOT EXISTS games (
     date TEXT NOT NULL,              -- official date, YYYY-MM-DD
     season INTEGER NOT NULL,
     game_type TEXT NOT NULL,         -- R regular, F/D/L/W postseason rounds
+    league TEXT,                     -- home team's league (AL/NL, or a Negro league pre-1949)
     away_id INTEGER, away TEXT, home_id INTEGER, home TEXT,
     away_score INTEGER, home_score INTEGER,
     innings INTEGER,
     venue TEXT,
-    has_pbp INTEGER NOT NULL DEFAULT 1,
+    has_pbp INTEGER NOT NULL DEFAULT 1,   -- 0 = score-level row only (no play-by-play exists)
     away_hits INTEGER, home_hits INTEGER,
     away_reached INTEGER, home_reached INTEGER,       -- batters who reached base
     away_innings_batted INTEGER, home_innings_batted INTEGER,
@@ -76,6 +77,13 @@ CREATE TABLE IF NOT EXISTS sync_state (
 """
 
 
+def _migrate(con: sqlite3.Connection) -> None:
+    """Add columns introduced after a database was first created."""
+    cols = {r[1] for r in con.execute("PRAGMA table_info(games)")}
+    if cols and "league" not in cols:
+        con.execute("ALTER TABLE games ADD COLUMN league TEXT")
+
+
 def connect(path: Path | str | None = None) -> sqlite3.Connection:
     p = Path(path) if path else DB_PATH
     if str(p) != ":memory:":
@@ -85,6 +93,7 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
     con.executescript(SCHEMA)
+    _migrate(con)
     try:
         con.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS plays_fts USING fts5("

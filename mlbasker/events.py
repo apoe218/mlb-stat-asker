@@ -10,7 +10,7 @@ from .entities import Entities
 from .index import catalog
 from .index.catalog import Filters
 from .index.db import has_fts
-from .index.sync import coverage
+from .index.sync import FIRST_PBP_SEASON, coverage
 from .timeparse import Parsed, parse
 
 LABELS = {
@@ -69,7 +69,7 @@ class EventSearch:
         self.con, self.entities, self.cutoff = con, entities, cutoff
 
     def _filters(self, q: str, parsed: Parsed) -> tuple[Filters, list[str], list[str]]:
-        teams, _ = self.entities.find_teams(q)
+        teams, _ = self.entities.find_teams(q, seasons=(parsed.season_from, parsed.season_to))
         players, ambiguous = self.entities.find_players(q)
         f = Filters(season_from=parsed.season_from, season_to=parsed.season_to,
                     date_to=self.cutoff.isoformat(), game_types=parsed.game_types,
@@ -87,15 +87,20 @@ class EventSearch:
 
     def answer(self, q: str) -> Answer:
         cov = coverage(self.con)
-        if not cov["games"]:
-            return Answer("The play-by-play index is empty, so I can't search history yet. "
-                          "Run `python -m mlbasker sync` once to build it (a few minutes per decade).",
-                          kind="needs_index")
         ql = q.lower()
+        matched = catalog.match(ql)
+        score_level = bool(matched and matched[0] == "game_extreme")   # needs only final scores
+        if not (cov["all_games"] if score_level else cov["games"]):
+            return Answer("The history index is empty, so I can't search it yet. Run "
+                          "`python -m mlbasker sync` once to build it (about an hour for everything; "
+                          "recent seasons first).", kind="needs_index")
         parsed = parse(q, self.cutoff)
         f, scope, ambiguous = self._filters(q, parsed)
+        blocked = (self._outside_score_coverage(parsed, cov) if score_level
+                   else self._outside_play_coverage(parsed, cov))
+        if blocked:
+            return Answer(blocked, footnote=through(self.cutoff))
 
-        matched = catalog.match(ql)
         ranked = False
         if matched:
             entry, spec = matched
@@ -119,16 +124,15 @@ class EventSearch:
         mode = parsed.mode
         total = self.con.execute(f"SELECT COUNT(*) FROM ({sql})", params).fetchone()[0]
         where = self._where_text(scope, parsed, f.home_only)
-        span = f"{cov['first_season']}–{cov['last_season']}"
-        foot = (f"Searched {cov['games']:,} indexed games ({span}), {through(self.cutoff)}"
-                + (f" Couldn't tell which player you meant by: {', '.join(ambiguous)}." if ambiguous else ""))
+        foot = self._footnote(cov, score_level) + " " + through(self.cutoff) + \
+            (f" Couldn't tell which player you meant by: {', '.join(ambiguous)}." if ambiguous else "")
 
         if total == 0:
-            return Answer(f"I couldn't find any {many}{where} in the indexed games.", footnote=foot)
+            return Answer(f"I couldn't find any {many}{where} in the games I can search.", footnote=foot)
 
         if mode == "count" and not ranked:
             return Answer(f"There {'has' if total == 1 else 'have'} been **{total:,}** "
-                          f"{one if total == 1 else many}{where} in the indexed games.", footnote=foot)
+                          f"{one if total == 1 else many}{where} in the games I can search.", footnote=foot)
 
         direction = "ASC" if mode == "first" else "DESC"
         order_by = order or f"date {direction}, game_pk {direction}, inning {direction}"
@@ -146,9 +150,15 @@ class EventSearch:
                 lead += f"\n\n> {r['detail']}"
             if total > 1:
                 lead += f"\n\nThere {'are' if total != 2 else 'is'} {total - 1:,} other{'s' if total != 2 else ''} in the index."
-            lead += f"\n\n*Based on indexed games from {pretty_date(cov['from'])} to {pretty_date(cov['to'])}.*"
-            if date.fromisoformat(cov["to"]) < self.cutoff - timedelta(days=7):
-                lead += (f" ⚠️ The index is behind (it stops {pretty_date(cov['to'])}), so a more recent "
+            last_day = cov["all_to"] if score_level else cov["to"]
+            if mode == "first" and not score_level and cov["first_season"] <= FIRST_PBP_SEASON:
+                lead += (f"\n\n*The API has play-by-play only from {FIRST_PBP_SEASON}, so this is the first "
+                         f"since then, not necessarily the first ever.*")
+            elif mode == "first" and cov["first_season"] > FIRST_PBP_SEASON and not score_level:
+                lead += (f"\n\n*The index holds {cov['first_season']}–{cov['last_season']} so far, so an "
+                         f"earlier one may exist.*")
+            if date.fromisoformat(last_day) < self.cutoff - timedelta(days=7):
+                lead += (f"\n\n⚠️ The index is behind (it stops {pretty_date(last_day)}), so a more recent "
                          f"one may exist. Run `python -m mlbasker sync` to catch up.")
             return Answer(lead, footnote=foot)
 
@@ -159,6 +169,41 @@ class EventSearch:
             head = f"Found **{total:,}** {one if total == 1 else many}{where}; showing {shown}:"
         return Answer(head, cols, table, foot)
 
+    @staticmethod
+    def _outside_play_coverage(parsed: Parsed, cov: dict) -> str | None:
+        """Explain when the asked-about seasons predate or fall outside the play-by-play index."""
+        a, b = parsed.season_from, parsed.season_to
+        if a is None and b is None:
+            return None
+        lo, hi = cov["first_season"], cov["last_season"]
+        rng = f"{a}" if a == b else f"{a or 'the start'}–{b or 'now'}"
+        if b is not None and b < FIRST_PBP_SEASON:
+            return (f"The API has no play-by-play before {FIRST_PBP_SEASON}, so I can't search plays "
+                    f"in {rng}. I can still give scores, standings, season stats and leaders for those years.")
+        if (b is not None and b < lo) or (a is not None and a > hi):
+            return (f"My play-by-play index doesn't cover {rng} yet (it holds {lo}–{hi}). "
+                    f"Run `python -m mlbasker sync` to fill it in.")
+        return None
+
+    @staticmethod
+    def _outside_score_coverage(parsed: Parsed, cov: dict) -> str | None:
+        b = parsed.season_to
+        if b is not None and b < cov["all_first_season"]:
+            return (f"The API has game scores only from {cov['all_first_season']}, so I can't search "
+                    f"games before then. Standings, season stats and leaders go back to 1876.")
+        return None
+
+    @staticmethod
+    def _footnote(cov: dict, score_level: bool) -> str:
+        if score_level:
+            return (f"Searched {cov['all_games']:,} games ({cov['all_first_season']}–{cov['all_last_season']}) "
+                    f"using final scores; innings are only recorded from {FIRST_PBP_SEASON}.")
+        if cov["first_season"] <= FIRST_PBP_SEASON:
+            return (f"Searched {cov['games']:,} games with play-by-play "
+                    f"({cov['first_season']}–{cov['last_season']}; the API has none earlier).")
+        return (f"Searched {cov['games']:,} indexed games ({cov['first_season']}–{cov['last_season']}); "
+                f"the index isn't fully built yet.")
+
     def _fts_ready(self) -> bool:
         try:
             self.con.execute("SELECT 1 FROM plays_fts LIMIT 1").fetchone()
@@ -168,7 +213,8 @@ class EventSearch:
 
     @staticmethod
     def _matchup(r) -> str:
-        return f"{r['away']} {r['away_score']} @ {r['home']} {r['home_score']}"
+        tag = f" [{r['league']}]" if r["league"] and r["league"] not in ("American League", "National League") else ""
+        return f"{r['away']} {r['away_score']} @ {r['home']} {r['home_score']}{tag}"
 
     @staticmethod
     def _inning(r, pre: str = "", post: str = "") -> str:

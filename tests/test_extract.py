@@ -25,3 +25,10 @@ def test_perfect_game_has_no_baserunners(extracted):
 def test_last_play_flagged_once(extracted):
     for ex in extracted.values():
         assert sum(p["is_last"] for p in ex["plays"]) == 1
+
+
+def test_larsen_perfect_game_from_1956_feed(extracted):
+    g = extracted["larsen_1956"]["game"]
+    assert (g["away_hits"], g["away_reached"], g["away_innings_batted"]) == (0, 0, 9)
+    assert g["final_out_event"] == "strikeout" and "Dale Mitchell" in g["final_out_desc"]
+    assert (g["away_score"], g["home_score"]) == (0, 2)      # from the schedule meta

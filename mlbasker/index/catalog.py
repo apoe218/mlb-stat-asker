@@ -209,9 +209,10 @@ def match(q: str) -> tuple[str, dict] | None:
     th = _threshold_record(q)
     if th:
         return "single_game_record", th
-    m = re.search(r"most (strikeouts|home runs|homers|hits|walks|rbi)s?\b.*\b(in a|in one|in single|single)[- ]?(game)?", q)
-    if m or re.search(r"most (strikeouts|home runs|homers|hits|walks)\b.*\bgame\b", q):
-        what = (m.group(1) if m else re.search(r"most (strikeouts|home runs|homers|hits|walks)", q).group(1))
+    # "in a single game" is a game record; "in a single season" is a leaders question
+    m = re.search(r"most (strikeouts|home runs|homers|hits|walks)\b.*\bgame\b", q)
+    if m:
+        what = m.group(1)
         return "single_game_record", {"stat": {"homers": "home runs"}.get(what, what)}
 
     for pat, how, label in PLAY_EVENTS:
@@ -226,7 +227,7 @@ def match(q: str) -> tuple[str, dict] | None:
 
 # --- builders ---------------------------------------------------------------------------
 GAME_COLS = ("g.date AS date, g.game_pk AS game_pk, g.away AS away, g.home AS home, "
-             "g.away_score AS away_score, g.home_score AS home_score")
+             "g.away_score AS away_score, g.home_score AS home_score, g.league AS league")
 
 
 def _in(values: list[str]) -> tuple[str, list]:
@@ -308,9 +309,11 @@ def build(entry: str, spec: dict, f: Filters) -> tuple[str, list, str]:
 
     if entry == "game_extreme":
         mn = f" AND g.innings >= {int(spec['min'])}" if spec.get("min") else ""
+        needs = " AND g.innings IS NOT NULL" if "innings" in spec["metric"] else " AND g.home_score IS NOT NULL"
+        # score-level rows (no play-by-play) count here: runs and innings come from the schedule
         sql = (f"SELECT {GAME_COLS}, NULL AS inning, NULL AS half, "
                f"({spec['metric']}) AS metric, '{spec['label']}: ' || ({spec['metric']}) AS detail "
-               f"FROM games g WHERE g.has_pbp = 1{mn} AND {gc}")
+               f"FROM games g WHERE 1=1{needs}{mn} AND {gc}")
         return sql, gp, f"metric {spec['order']}, date DESC"
 
     if entry == "single_game_record":

@@ -22,5 +22,18 @@
   "date": "2009-07-23",
   "season": 2009,
   "game_type": "R"
+ },
+ "larsen_1956": {
+  "game_pk": 67524,
+  "date": "1956-10-08",
+  "season": 1956,
+  "game_type": "W",
+  "league": "American League",
+  "away_id": 119,
+  "away": "Brooklyn Dodgers",
+  "home_id": 147,
+  "home": "New York Yankees",
+  "away_score": 0,
+  "home_score": 2
  }
 }

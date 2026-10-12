@@ -9,6 +9,15 @@ from dataclasses import dataclass
 from .client import MlbClient, TTL_LONG
 
 # Older / alternate names → franchise id (ids are stable per franchise in the API)
+HISTORIC_TEAMS = {   # era names → franchise id (ids never change for a franchise)
+    "brooklyn dodgers": 119, "brooklyn robins": 119, "brooklyn superbas": 119, "new york giants": 137,
+    "boston braves": 144, "milwaukee braves": 144, "philadelphia athletics": 133,
+    "kansas city athletics": 133, "st louis browns": 110, "montreal expos": 120, "seattle pilots": 158,
+    "houston colt 45s": 117, "california angels": 108, "anaheim angels": 108,
+    "los angeles angels of anaheim": 108, "cincinnati redlegs": 113, "florida marlins": 146,
+    "tampa bay devil rays": 139, "cleveland indians": 114, "cleveland naps": 114,
+}
+
 TEAM_EXTRAS = {
     "indians": 114, "cleveland indians": 114, "devil rays": 139, "tampa bay devil rays": 139,
     "expos": 120, "montreal expos": 120, "florida marlins": 146, "athletics": 133, "a's": 133,
@@ -56,6 +65,7 @@ class Entities:
         self._teams: list[Team] | None = None
         self._aliases: list[tuple[str, Team]] | None = None
         self._pcache: dict[str, tuple[int, str]] | None = None
+        self._era: dict[int, list[Team]] = {}
 
     # --- teams ------------------------------------------------------------------------
     def teams(self) -> list[Team]:
@@ -78,14 +88,42 @@ class Entities:
                 team = self.team_by_id(tid) if tid else None
                 if team:
                     out.append((norm(alias), team))
+            for alias, tid in HISTORIC_TEAMS.items():
+                cur = self.team_by_id(tid)
+                if cur:   # keep the era name the user typed, on the franchise's stable id
+                    out.append((alias, Team(tid, alias.title().replace("St ", "St. "), alias.split()[-1].title())))
             self._aliases = sorted(out, key=lambda x: -len(x[0]))
         return self._aliases
 
-    def find_teams(self, text: str) -> tuple[list[Team], str]:
-        """Teams named in `text`, in order of appearance, plus the text with them blanked out."""
+    def _era_teams(self, season: int) -> list[Team]:
+        """Teams as they were named in `season` (Brooklyn Dodgers 1955, Negro leagues 1927...)."""
+        if season not in self._era:
+            data = self.client.get("teams", {"sportId": 1, "season": season}, ttl=TTL_LONG)
+            self._era[season] = [Team(t["id"], t["name"], t.get("teamName", t["name"]))
+                                 for t in data.get("teams", [])]
+        return self._era[season]
+
+    def find_teams(self, text: str, seasons: tuple[int | None, int | None] | None = None
+                   ) -> tuple[list[Team], str]:
+        """Teams named in `text`, in order of appearance, plus the text with them blanked out.
+
+        `seasons` (first, last) adds the team names used in those years.
+        """
+        aliases = list(self._team_aliases())
+        if seasons and any(seasons):
+            a = seasons[0] or seasons[1]
+            b = seasons[1] or seasons[0]
+            for yr in sorted({a, b, (a + b) // 2}):
+                if 1876 <= yr <= 2100:
+                    try:
+                        for t in self._era_teams(yr):
+                            aliases += [(norm(t.name), t), (norm(t.short), t)]
+                    except Exception:
+                        pass
+            aliases.sort(key=lambda x: -len(x[0]))
         t = " " + norm(text) + " "
         hits: list[tuple[int, Team]] = []
-        for alias, team in self._team_aliases():
+        for alias, team in aliases:
             for m in re.finditer(rf"(?<![a-z]){re.escape(alias)}(?![a-z])", t):
                 hits.append((m.start(), team))
                 t = t[:m.start()] + " " * (m.end() - m.start()) + t[m.end():]
@@ -127,13 +165,17 @@ class Entities:
         return [Player(p["id"], p["fullName"], (p.get("primaryPosition") or {}).get("abbreviation"),
                        p.get("active")) for p in data.get("people", [])]
 
-    def position(self, player: Player) -> str | None:
-        """Primary position code (P, TWP, SS...). Index-resolved players don't carry one."""
-        if player.position:
-            return player.position
+    def profile(self, player: Player) -> dict:
+        """Position, whether still active, and debut year. Index-resolved players carry none."""
         data = self.client.get(f"people/{player.id}", ttl=TTL_LONG)
-        people = data.get("people") or [{}]
-        return (people[0].get("primaryPosition") or {}).get("abbreviation")
+        p = (data.get("people") or [{}])[0]
+        debut = p.get("mlbDebutDate")
+        return {"position": player.position or (p.get("primaryPosition") or {}).get("abbreviation"),
+                "active": p.get("active"), "debut_year": int(debut[:4]) if debut else None}
+
+    def position(self, player: Player) -> str | None:
+        """Primary position code (P, TWP, SS...)."""
+        return player.position or self.profile(player)["position"]
 
     def find_players(self, text: str, limit: int = 3, lenient: bool = False) -> tuple[list[Player], list[str]]:
         """Players named in `text`. Second value lists ambiguous names we could not pin down."""
