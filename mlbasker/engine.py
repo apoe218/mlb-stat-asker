@@ -24,11 +24,13 @@ Try things like:
 - *List all unassisted triple plays* · *How many walk-off grand slams since 2015?*"""
 
 RESULT_RE = re.compile(r"\b(score|scores|result|results|box score|who won|beat|did .{1,40}\b(win|lose)|final|"
+                       r"what happened|how did (the )?.{1,30} do|recap|"
                        r"game (yesterday|last night)|play(ed)? (yesterday|last night)|last game)\b")
 STANDINGS_RE = re.compile(r"standings|games back|\bgb\b|division (lead|race)|wild[- ]card (race|standings)|"
                           r"how (are|is|have) (the )?.{1,30}(doing|been)|\brecord\b|\bwhat place\b")
 LEADERS_RE = re.compile(r"\blead(s|er|ers|ing)?\b|\btop \d+\b|who (has|had) the (most|best|highest|lowest|fewest)|"
-                        r"\bbest .{1,30} in (the )?(league|mlb|majors|baseball)|\bmost .{1,25} (in|across) (the )?(league|mlb|majors|baseball)")
+                        r"\bbest .{1,30} in (the )?(al|nl|american league|national league|league|mlb|majors|baseball)|"
+                        r"\b(in|for) the (al|nl|american league|national league)\b|\bmost .{1,25} (in|across) (the )?(league|mlb|majors|baseball)")
 
 
 class Asker:
@@ -71,7 +73,7 @@ class Asker:
         if LEADERS_RE.search(ql):
             return stats.leaders(q, parsed, teams)
 
-        players, ambiguous = entities.find_players(q)
+        players, ambiguous = entities.find_players(q, lenient=True)
         if players:
             return stats.player_stat(q, players[0], parsed)
         if ambiguous:

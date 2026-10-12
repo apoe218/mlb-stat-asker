@@ -77,12 +77,17 @@ class Stats:
         return TTL_SHORT if end >= self.cutoff - timedelta(days=2) else TTL_LONG
 
     def _game_types(self, parsed: Parsed) -> str:
-        return ",".join(parsed.game_types) if parsed.game_types else "R"
+        gt = parsed.game_types
+        if not gt:
+            return "R"
+        return "P" if len(gt) > 1 else gt[0]     # P = every postseason round combined
 
     # --- player stats -----------------------------------------------------------------
     def _split(self, data: dict) -> dict | None:
+        """One split per team stint, plus a combined 'All' split (sport id 0) — prefer the combined."""
         splits = (data.get("stats") or [{}])[0].get("splits", [])
-        return splits[0] if splits else None
+        total = next((s for s in splits if (s.get("sport") or {}).get("id") == 0), None)
+        return total or (splits[0] if splits else None)
 
     def player_stat(self, q: str, player: Player, parsed: Parsed) -> Answer:
         ql = q.lower()
@@ -91,8 +96,8 @@ class Stats:
         stat = find_stat(ql)
         pitching_words = bool(re.search(r"pitch|\bera\b|\bwhip\b|\bsaves?\b|innings|\bwins\b|started", ql))
         group = stat[3] if stat and stat[3] else None
+        pos = self.entities.position(player) or ""
         if group is None:
-            pos = player.position or ""
             if pos == "P" or (pos == "TWP" and pitching_words):
                 group = "pitching"
             elif pitching_words and pos in ("", "TWP"):
@@ -100,7 +105,7 @@ class Stats:
             else:
                 group = "hitting"
         if stat is None:
-            group = "pitching" if (player.position == "P" or pitching_words) else "hitting"
+            group = "pitching" if (pos == "P" or pitching_words) else "hitting"
 
         params = {"stats": "byDateRange", "group": group, "startDate": start.isoformat(),
                   "endDate": end.isoformat(), "gameType": self._game_types(parsed)}
@@ -146,6 +151,7 @@ class Stats:
         _, field, label, group, sort, asc, rate = stat
         if group is None:
             group = "pitching" if re.search(r"pitch", ql) else "hitting"
+        league = 103 if re.search(r"\b(al|american league)\b", ql) else 104 if re.search(r"\b(nl|national league)\b", ql) else None
         n = 10 if re.search(r"top (10|ten)|leaders", ql) else 5
         m = re.search(r"top (\d+)", ql)
         if m:
@@ -161,6 +167,8 @@ class Stats:
                   "gameType": self._game_types(parsed)}
         if teams:
             params["teamId"] = ",".join(str(t.id) for t in teams)
+        if league:
+            params["leagueIds"] = league
         data = self.client.get("stats", params, ttl=self._ttl(end))
         splits = (data.get("stats") or [{}])[0].get("splits", [])[:n]
         if not splits:
@@ -168,7 +176,7 @@ class Stats:
         rows = [[i + 1, s["player"]["fullName"], (s.get("team") or {}).get("name", ""), str(s["stat"].get(field, "—"))]
                 for i, s in enumerate(splits)]
         top = rows[0]
-        scope = f" for the {teams[0].short}" if teams else ""
+        scope = f" for the {teams[0].short}" if teams else (" in the AL" if league == 103 else " in the NL" if league == 104 else "")
         if n == 1:
             return Answer(f"**{top[1]}** ({top[2]}) leads{scope} in {label} in the {wlabel} with **{top[3]}**.",
                           ["#", "Player", "Team", label[:1].upper() + label[1:]], rows, through(self.cutoff) +
@@ -257,12 +265,16 @@ class Stats:
             return Answer(f"That date is past my cutoff. I only have games through "
                           f"{pretty_date(self.cutoff.isoformat())}.", footnote=through(self.cutoff))
         params = {"sportId": 1, "hydrate": "decisions,linescore,team"}
+        head_to_head = len(teams) >= 2
         if teams:
-            params["teamId"] = ",".join(str(t.id) for t in teams[:2])
+            params["teamId"] = teams[0].id
+            if head_to_head:
+                params["opponentId"] = teams[1].id
         if d:
             params["date"] = d.isoformat()
         else:                                   # "last game"
-            params["startDate"] = (self.cutoff - timedelta(days=30)).isoformat()
+            lookback = 400 if head_to_head else 30
+            params["startDate"] = (self.cutoff - timedelta(days=lookback)).isoformat()
             params["endDate"] = self.cutoff.isoformat()
         data = self.client.get("schedule", params, ttl=TTL_SHORT)
         games = [g for dt in data.get("dates", []) for g in dt["games"]
@@ -271,8 +283,8 @@ class Stats:
             last_day = max(g["officialDate"] for g in games)
             games = [g for g in games if g["officialDate"] == last_day]
         if not games:
-            who = f" for {', '.join(t.name for t in teams)}" if teams else ""
-            when = f" on {pretty_date(d.isoformat())}" if d else " in the last 30 days"
+            who = f" for {' vs '.join(t.name for t in teams[:2])}" if teams else ""
+            when = f" on {pretty_date(d.isoformat())}" if d else (" in the last 13 months" if head_to_head else " in the last 30 days")
             return Answer(f"I didn't find a completed game{who}{when}.", footnote=through(self.cutoff))
         rows, lines = [], []
         for g in games:

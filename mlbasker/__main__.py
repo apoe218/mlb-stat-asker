@@ -33,6 +33,7 @@ def main() -> None:
 
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     if args.cmd == "serve":
         import os

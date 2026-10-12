@@ -108,6 +108,9 @@ class EventSearch:
             if entry == "single_game_record":
                 stat = {"strikeouts": "strikeout", "walks": "walk", "home runs": "home run"}.get(spec["stat"], spec["stat"].rstrip("s"))
                 one = many = f"single-game {stat} performances"
+                if spec.get("min"):
+                    one, many = f"game with {spec['min']}+ {spec['stat']} by one player", \
+                                f"games with {spec['min']}+ {spec['stat']} by one player"
         else:
             text = _clean_phrase(q)
             sql, params = catalog.text_search(f, text, has_fts(self.con) and self._fts_ready())
@@ -115,7 +118,7 @@ class EventSearch:
 
         mode = parsed.mode
         total = self.con.execute(f"SELECT COUNT(*) FROM ({sql})", params).fetchone()[0]
-        where = self._where_text(scope, parsed)
+        where = self._where_text(scope, parsed, f.home_only)
         span = f"{cov['first_season']}–{cov['last_season']}"
         foot = (f"Searched {cov['games']:,} indexed games ({span}), {through(self.cutoff)}"
                 + (f" Couldn't tell which player you meant by: {', '.join(ambiguous)}." if ambiguous else ""))
@@ -174,10 +177,10 @@ class EventSearch:
         return f"{pre}{r['half']} {r['inning']}{post}"
 
     @staticmethod
-    def _where_text(scope: list[str], parsed: Parsed) -> str:
+    def _where_text(scope: list[str], parsed: Parsed, home_only: bool = False) -> str:
         bits = []
         if scope:
-            bits.append("involving " + " / ".join(scope))
+            bits.append(("by " if home_only else "involving ") + " / ".join(scope))
         if parsed.season_from is not None or parsed.season_to is not None:
             a, b = parsed.season_from, parsed.season_to
             bits.append(f"in {a}" if a == b else f"from {a or 'the start'} to {b or 'now'}")

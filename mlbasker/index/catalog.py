@@ -143,6 +143,21 @@ HISTORY_CUES = re.compile(r"last time|first time|most recent|latest|earliest|\bw
 ORDINAL_OUTS = {"double": 2, "triple": 3}
 
 
+def _threshold_record(q: str) -> dict | None:
+    """'a pitcher struck out 20', 'hit 4 home runs in a game' → {'stat': ..., 'min': N}."""
+    if not re.search(r"in a game|in one game|single[- ]game|\ba (pitcher|batter|player|hitter)\b|\bgame\b", q):
+        return None
+    for pat, stat in ((r"struck out (\d+)|(\d+)\+? (strikeouts|k's)|(\d+)[- ]strikeout", "strikeouts"),
+                      (r"(\d+)[- ]?(home runs?|homers?)|hit (\d+) (home runs?|homers?)|(\d+)[- ]homer game", "home runs"),
+                      (r"(\d+) hits in a game|(\d+)[- ]hit game", "hits")):
+        m = re.search(pat, q)
+        if m:
+            n = next((int(g) for g in m.groups() if g and g.isdigit()), None)
+            if n and n >= 2:
+                return {"stat": stat, "min": n}
+    return None
+
+
 # --- matchers ---------------------------------------------------------------------------
 def match(q: str) -> tuple[str, dict] | None:
     """Return (entry_key, spec) for the first catalog entry that fits the question."""
@@ -169,10 +184,14 @@ def match(q: str) -> tuple[str, dict] | None:
         return "walk_off", {"how": None, "label": "walk-off win"}
     if re.search(r"(game|games|contest)\s+(end|ended|ends|ending|finish|finished|was over|concluded)|"
                  r"ended (the game|a game|on)|final out|game[- ]ending|game[- ]ender", q):
-        for pat, fam in FINAL_OUT_FAMILIES:
+        for pat, fam in FINAL_OUT_FAMILIES:          # outs first: "ended on a double play"
             if re.search(pat, q):
                 return "game_end", {"family": fam, "base": _base_in(q) if fam == "pickoff" else None}
-        return "game_end", {"family": None, "base": None}
+        rest = re.sub(r"game[- ]ending|game[- ]ender", " ", q)
+        for pat, how, label in WALKOFF_FAMILIES:     # ...then ways a home team ends it by scoring
+            if re.search(pat, rest):
+                return "walk_off", {"how": how, "label": label}
+        return None   # "ended on <something we don't know>": say so rather than guess
 
     # extremes
     if re.search(r"longest game", q):
@@ -187,6 +206,9 @@ def match(q: str) -> tuple[str, dict] | None:
         return "game_extreme", {"metric": "innings", "order": "DESC", "label": "innings", "min": 10}
 
     # single-game individual records
+    th = _threshold_record(q)
+    if th:
+        return "single_game_record", th
     m = re.search(r"most (strikeouts|home runs|homers|hits|walks|rbi)s?\b.*\b(in a|in one|in single|single)[- ]?(game)?", q)
     if m or re.search(r"most (strikeouts|home runs|homers|hits|walks)\b.*\bgame\b", q):
         what = (m.group(1) if m else re.search(r"most (strikeouts|home runs|homers|hits|walks)", q).group(1))
@@ -310,6 +332,8 @@ def build(entry: str, spec: dict, f: Filters) -> tuple[str, list, str]:
                f"{name} || ': ' || COUNT(*) || ' {role}' AS detail "
                "FROM plays p JOIN games g ON g.game_pk = p.game_pk "
                f"WHERE {w} AND {gc}{player_sql} GROUP BY p.game_pk, {who.split(', ')[0]}")
+        if spec.get("min"):      # "a pitcher struck out 20" → chronological, so last/first/count work
+            return (f"SELECT * FROM ({sql}) WHERE metric >= ?", gp + player_p + [spec["min"]], "")
         return sql, gp + player_p, "metric DESC, date DESC"
 
     if entry == "play_event":

@@ -67,7 +67,10 @@ def create_app(*, feed: bool = True) -> FastAPI:
     def ask(req: AskRequest) -> dict:
         try:
             with lock:
-                return asker.ask(req.question).to_dict()
+                ans = asker.ask(req.question)
+            if state["syncing"] and ans.kind == "answer" and ans.footnote:
+                ans.footnote += " ⚠️ The history index is still being updated, so results may be incomplete."
+            return ans.to_dict()
         except ApiError as e:
             return {"text": f"The MLB API didn't respond: {e}", "columns": [], "rows": [],
                     "footnote": "", "kind": "error"}

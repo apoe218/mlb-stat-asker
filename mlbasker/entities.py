@@ -127,7 +127,15 @@ class Entities:
         return [Player(p["id"], p["fullName"], (p.get("primaryPosition") or {}).get("abbreviation"),
                        p.get("active")) for p in data.get("people", [])]
 
-    def find_players(self, text: str, limit: int = 3) -> tuple[list[Player], list[str]]:
+    def position(self, player: Player) -> str | None:
+        """Primary position code (P, TWP, SS...). Index-resolved players don't carry one."""
+        if player.position:
+            return player.position
+        data = self.client.get(f"people/{player.id}", ttl=TTL_LONG)
+        people = data.get("people") or [{}]
+        return (people[0].get("primaryPosition") or {}).get("abbreviation")
+
+    def find_players(self, text: str, limit: int = 3, lenient: bool = False) -> tuple[list[Player], list[str]]:
         """Players named in `text`. Second value lists ambiguous names we could not pin down."""
         found: list[Player] = []
         ambiguous: list[str] = []
@@ -155,9 +163,13 @@ class Entities:
                 used = used.replace(c, " ")
             if len(found) >= limit:
                 break
-        if not found:  # single, capitalised surname ("how many homers does Judge have")
-            for tok in re.findall(r"(?<!^)(?<![.?!]\s)\b[A-Z][a-zA-Z'\-]{3,}\b", text):
-                if tok in STOP_CAPS or self.find_teams(tok)[0] or api_calls >= 6:
+        if not found:  # single surname ("how many homers does Judge have", "skubal wins")
+            plain = re.sub(r"['’]s\b", "", text)
+            toks = re.findall(r"\b[A-Z][a-zA-Z'\-]{3,}\b", plain)
+            if lenient and not toks:   # lower-case chat input: any unfamiliar word could be a surname
+                toks = [t for t in re.findall(r"[a-z][a-z'\-]{3,}", plain) if t not in _COMMON][:3]
+            for tok in toks:
+                if tok in STOP_CAPS or tok.lower() in _COMMON or self.find_teams(tok)[0] or api_calls >= 6:
                     continue
                 api_calls += 1
                 actives = [m for m in self._from_api(tok) if m.active and
