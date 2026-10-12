@@ -18,7 +18,7 @@ from .client import ApiError, MlbClient
 from .cutoff import cutoff_date
 from .engine import Asker
 from .index import db as dbmod
-from .index.sync import FIRST_PBP_SEASON, coverage, sync_recent, sync_seasons
+from .index.sync import FIRST_SEASON, coverage, pbp_depth, sync_seasons
 from .timeparse import season_of
 
 log = logging.getLogger("mlbasker")
@@ -31,14 +31,15 @@ class AskRequest(BaseModel):
 
 
 def _feeder(state: dict) -> None:
-    """Background loop: backfill the index once, then top it up through yesterday."""
+    """Background loop: build the index (newest seasons first), then top it up through yesterday."""
     con = dbmod.connect()          # own connection: sqlite objects are per-thread here
     client = MlbClient()
-    first = int(os.environ.get("MLBASKER_FIRST_SEASON", FIRST_PBP_SEASON))
     while True:
         try:
             state["syncing"] = True
-            sync_seasons(con, client, first, season_of(cutoff_date()), progress=lambda m: log.info(m))
+            cutoff = cutoff_date()
+            sync_seasons(con, client, FIRST_SEASON, season_of(cutoff), pbp_from=pbp_depth(None, cutoff),
+                         progress=lambda m: log.info(m))
             state["last_sync"] = time.time()
         except ApiError as e:
             log.warning("index refresh failed: %s", e)
@@ -69,8 +70,11 @@ def create_app(*, feed: bool = True) -> FastAPI:
         try:
             with lock:
                 ans = asker.ask(question)
-            if state["syncing"] and ans.kind == "answer" and ans.footnote:
-                ans.notes.append("The history index is still being updated, so results may be incomplete.")
+            building = state["syncing"] and (ans.kind == "answer" and ans.footnote
+                                             or ans.title in ("No results", "No World Series"))
+            if building:
+                ans.notes.append("The history index is still being built, so this may be incomplete "
+                                 "or simply not indexed yet.")
             out = ans.to_dict()
         except ApiError as e:
             out = Answer(f"The MLB API didn't respond: {e}", kind="error", title="MLB API unavailable",
@@ -96,6 +100,7 @@ def create_app(*, feed: bool = True) -> FastAPI:
             finally:
                 lock.release()
         return {"cutoff": cutoff_date().isoformat(), "index": state.get("coverage", {}),
+                "pbp_from": pbp_depth(None, cutoff_date()),
                 "syncing": state["syncing"], "last_sync": state["last_sync"]}
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")

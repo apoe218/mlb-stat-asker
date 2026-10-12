@@ -109,3 +109,27 @@ def test_score_level_search_before_first_game_row_explains(es, index):
     index.commit()
     a = es.answer("highest scoring game before 1900")
     assert "only from 1927" in a.text and "back to 1876" in a.text
+
+
+def test_empty_result_on_a_shallow_index_says_how_to_go_deeper(es):
+    # the fixture index starts in 1956, i.e. it was built with a shallow --history
+    a = es.answer("how many triple plays in 2009 involving the Nationals")
+    assert a.title == "No results" and any("--history full" in n for n in a.notes)
+    assert "--history full" in es.answer("how many no-hitters").footnote
+
+
+def test_parallel_schedule_windows_keep_order_and_dedupe():
+    from datetime import date
+    from mlbasker.index.sync import final_games
+    from tests.test_sync import game
+    g = lambda pk, day: game(pk, {"id": 1, "name": "A"}, {"id": 2, "name": "B"}, officialDate=day)
+    pages = iter([{"dates": [{"date": "2019-04-02", "games": [g(2, "2019-04-02"), g(1, "2019-04-01")]}]},
+                  {"dates": [{"date": "2019-05-02", "games": [g(2, "2019-04-02"), g(3, "2019-05-02")]}]}])
+
+    class C(FakeClient):
+        def get(self, path, params=None, **kw):       # windows come back in request order
+            self.calls.append((path, dict(params or {})))
+            return PAGES[params["startDate"]]
+    PAGES = {"2019-04-01": next(pages), "2019-05-01": next(pages)}
+    out = final_games(C(), date(2019, 4, 1), date(2019, 5, 30))
+    assert [x["game_pk"] for x in out] == [2, 1, 3]

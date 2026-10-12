@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS players (
 );
 
 CREATE TABLE IF NOT EXISTS sync_state (
-    season INTEGER PRIMARY KEY, synced_through TEXT NOT NULL
+    season INTEGER PRIMARY KEY, synced_through TEXT NOT NULL,
+    pbp INTEGER NOT NULL DEFAULT 0          -- 1 once this season's play-by-play has been fetched
 );
 """
 
@@ -128,6 +129,10 @@ def _migrate(con: sqlite3.Connection) -> None:
     cols = {r[1] for r in con.execute("PRAGMA table_info(games)")}
     if cols and "league" not in cols:
         con.execute("ALTER TABLE games ADD COLUMN league TEXT")
+    sync_cols = {r[1] for r in con.execute("PRAGMA table_info(sync_state)")}
+    if sync_cols and "pbp" not in sync_cols:
+        con.execute("ALTER TABLE sync_state ADD COLUMN pbp INTEGER NOT NULL DEFAULT 0")
+        con.execute("UPDATE sync_state SET pbp = 1 WHERE season >= 1950")   # built before depth was tracked
     con.execute("DROP INDEX IF EXISTS plays_batter")      # superseded by plays_batter_ev
     con.execute("DROP INDEX IF EXISTS plays_pitcher")
     have_plays = con.execute("SELECT 1 FROM plays LIMIT 1").fetchone()

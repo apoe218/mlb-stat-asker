@@ -254,7 +254,9 @@
       const i = s.index || {};
       const d = new Date(s.cutoff + "T12:00:00");
       const when = d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-      const hist = i.all_games ? `${i.all_games.toLocaleString()} games · ${i.all_first_season}–${i.all_last_season}` : "history index not built yet";
+      const hist = i.all_games
+        ? `${i.all_games.toLocaleString()} games · plays ${i.games ? i.first_season + "–" + i.last_season : "not built yet"}`
+        : "history index not built yet";
       const parts = [`Data through ${when}`, hist].concat(s.syncing ? ["updating…"] : []);
       statusEl.innerHTML = `<span class="dot ${s.syncing ? "busy" : ""}"></span>` +
         parts.map((x) => `<span class="nw">${esc(x)}</span>`).join(" · ");

@@ -10,33 +10,64 @@ looked up from the API.
 
 ## Run it
 
-```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
+You need Python 3.11+ and nothing else: no compiler, no database server, no API key.
 
-python -m mlbasker serve          # http://127.0.0.1:8000
+```bash
+git clone https://github.com/apoe218/mlb-stat-asker && cd mlb-stat-asker
+./run.sh                 # macOS / Linux          (Windows: run.bat)
 ```
 
-On start, `serve` also feeds the history index in the background (see below): a one-time backfill
-of everything the API has — **about an hour and roughly 4 GB on disk** — newest seasons first, so
-recent questions work within minutes. After that it tops up every 6 hours. Use `--no-feed` to
-disable, or `sync --from 1990` to build only part of it.
+That one command creates a private environment (first time only, a few seconds: every dependency is
+a prebuilt wheel, so nothing compiles), starts the app and opens it in your browser at
+http://127.0.0.1:8000.
 
-Other commands:
+**Live questions work immediately**: player stats, comparisons, leaders, standings and scores
+come straight from the MLB API. **History search** (game endings, triple plays, walk-offs,
+champions, records…) is answered from a local index that builds in the background while you use the app:
+
+| `--history` | Play-by-play indexed | First-run build | Disk |
+|---|---|---|---|
+| `recent` (default) | last 10 seasons | **~6.5 minutes** (measured, incl. all-time scores) | ~0.7 GB |
+| `modern` | 1990 on | ~20 minutes (estimated) | ~2 GB |
+| `full` | 1950 on | ~40–60 minutes (estimated) | ~4 GB |
+| a year, e.g. `2005` | that year on | in between | |
+
+Final scores for **every** year (1901 on) are always included (about a minute) and power champions,
+records and "highest-scoring game". The newest season is searchable within about 30 seconds, and
+the page footer shows how far back the plays go. If a search comes up empty because it predates what's
+indexed, the answer says so and how to go deeper. Go deeper whenever you like; it fills in what's
+missing without re-downloading what you have:
+
+```bash
+./run.sh --history full          # or: python -m mlbasker serve --history full
+```
+
+The index tops itself up every 6 hours while the app is running. Use `--no-feed` to stop all
+background downloading.
+
+Other commands (activate `.venv` first, or use `.venv/bin/python`):
 
 ```bash
 python -m mlbasker ask "last time a game ended on a pickoff at first base"
-python -m mlbasker sync --from 1990          # build/resume the index for a range of seasons
+python -m mlbasker sync --history modern     # build the index without starting the web app
 python -m mlbasker update                    # index just the last week
-python -m mlbasker status                    # cutoff date + index coverage
+python -m mlbasker status                    # cutoff date, history depth, index coverage
 ```
 
-The first start after upgrading an older index runs a one-time migration (about 30 s on a 4 GB
-index) that adds indexes and small per-game tables; history questions then answer in well under a
-second.
-
 Files live under `data/` (git-ignored): `plays.sqlite` (index) and `cache/` (short-lived API cache).
-Override with `MLBASKER_DB` and `MLBASKER_CACHE`.
+Override with `MLBASKER_DB` and `MLBASKER_CACHE`. Set `MLBASKER_HISTORY` to make a depth the default.
+
+### In GitHub Codespaces
+
+Open the repo → **Code → Codespaces → Create codespace**. The included `.devcontainer` installs
+everything and starts the app; open the forwarded port 8000 (private to you). A codespace sleeps
+when idle, which pauses the background index build until you return; live questions always work.
+
+### Upgrading an older index
+
+The first start after upgrading an index built by an earlier version runs a one-time migration
+(about 30 s on a 4 GB index) that adds indexes and small per-game tables; history questions then
+answer in well under a second.
 
 ## The interface
 
@@ -126,6 +157,7 @@ question ─► engine.Asker ─┬─► events.EventSearch ─► index/catalo
 ## Tests
 
 ```bash
+pip install -r requirements-dev.txt
 pytest
 ```
 

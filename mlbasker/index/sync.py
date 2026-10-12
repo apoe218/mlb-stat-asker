@@ -1,6 +1,7 @@
 """Crawl the Stats API into the local index. Resumable; never indexes past the cutoff."""
 from __future__ import annotations
 
+import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -8,12 +9,31 @@ from typing import Callable
 
 from ..client import BASE_11, MlbClient, TTL_LONG
 from ..cutoff import cutoff_date
+from ..timeparse import season_of
 from .db import has_fts, refresh_game_totals
 from .extract import FEED_FIELDS, extract_game, score_only
 
 GAME_TYPES = "R,F,D,L,W"   # regular season + postseason rounds; no spring training / All-Star
 FIRST_SEASON = 1876        # earliest season in the API: score-level rows from here
 FIRST_PBP_SEASON = 1950    # earliest season with play-by-play (1949 and before: none; checked)
+
+
+PROFILES = {"recent": "the last 10 seasons", "modern": "1990 on", "full": f"{FIRST_PBP_SEASON} on"}
+
+
+def pbp_depth(profile: str | None = None, cutoff: date | None = None) -> int:
+    """First season to fetch play-by-play for.
+
+    Score-level rows (final scores, champions, records) are always built for every year: they cost a
+    handful of schedule calls per season. Play-by-play is the slow, big part, so how far back it goes
+    is a choice: "recent" (default, ~10 minutes), "modern" (1990+), "full" (1950+, about an hour),
+    or a year. Set with MLBASKER_HISTORY.
+    """
+    p = (profile or os.environ.get("MLBASKER_HISTORY") or "recent").strip().lower()
+    cur = season_of(cutoff or cutoff_date())
+    if p.isdigit():
+        return min(max(FIRST_PBP_SEASON, int(p)), cur)
+    return {"recent": cur - 9, "modern": 1990, "full": FIRST_PBP_SEASON}.get(p, cur - 9)
 
 
 def _chunks(start: date, end: date, days: int = 30):
@@ -52,12 +72,24 @@ def _schedule_meta(g: dict, day: str) -> dict:
             "innings": innings, "venue": (g.get("venue") or {}).get("name")}
 
 
-def final_games(client: MlbClient, start: date, end: date) -> list[dict]:
-    games: list[dict] = []
-    for a, b in _chunks(start, end):
-        data = client.get("schedule", {"sportId": 1, "startDate": a.isoformat(), "endDate": b.isoformat(),
+def final_games(client: MlbClient, start: date, end: date, *, workers: int = 8) -> list[dict]:
+    """Finished games in [start, end], fetching the schedule's 30-day windows in parallel."""
+    windows = list(_chunks(start, end))
+
+    def fetch(win: tuple[date, date]) -> dict:
+        a, b = win
+        return client.get("schedule", {"sportId": 1, "startDate": a.isoformat(), "endDate": b.isoformat(),
                                        "gameType": GAME_TYPES, "hydrate": "team,linescore"},
                           ttl=TTL_LONG if b < cutoff_date() - timedelta(days=3) else 300)
+
+    if len(windows) > 1:
+        with ThreadPoolExecutor(max_workers=min(workers, len(windows))) as pool:
+            pages = list(pool.map(fetch, windows))
+    else:
+        pages = [fetch(w) for w in windows]
+
+    games: list[dict] = []
+    for data in pages:
         for d in data.get("dates", []):
             for g in d.get("games", []):
                 if g.get("status", {}).get("abstractGameState") != "Final":
@@ -104,26 +136,33 @@ def _clear_game(con: sqlite3.Connection, game_pk: int) -> None:
 
 def sync_range(con: sqlite3.Connection, client: MlbClient, start: date, end: date, *,
                workers: int = 8, progress: Callable[[str], None] = print,
-               play_by_play: bool = True) -> dict:
+               play_by_play: bool = True, pbp_from: int = FIRST_PBP_SEASON, upgrade: bool = False) -> dict:
     """Index every finished game in [start, end] (capped at the cutoff) not yet indexed.
 
-    Seasons before FIRST_PBP_SEASON have no play-by-play, so they get score-level rows only.
+    Seasons before `pbp_from` (and before FIRST_PBP_SEASON, which has none) get score-level rows only.
+    `upgrade` re-fetches games already stored score-only whose season now wants play-by-play.
     """
     end = min(end, cutoff_date())
     if start > end:
         return {"indexed": 0, "score_only": 0, "skipped": 0, "failed": 0}
-    known = {r[0]: r[1] for r in con.execute("SELECT game_pk, league IS NULL FROM games")}
+    known = {r[0]: (r[1], r[2]) for r in con.execute("SELECT game_pk, league IS NULL, has_pbp FROM games")}
     games = final_games(client, start, end)
     stats = {"indexed": 0, "score_only": 0, "skipped": 0, "failed": 0}
+    floor = max(FIRST_PBP_SEASON, pbp_from)
 
     todo = []
     for g in games:
+        wants_plays = play_by_play and g["season"] >= floor
         if g["game_pk"] in known:
-            stats["skipped"] += 1
-            if known[g["game_pk"]]:       # indexed before leagues were recorded: fill it in
+            needs_league, has_pbp = known[g["game_pk"]]
+            if needs_league:       # indexed before leagues were recorded: fill it in
                 con.execute("UPDATE games SET league = ? WHERE game_pk = ?", (g["league"], g["game_pk"]))
+            if upgrade and wants_plays and not has_pbp:
+                todo.append(g)
+            else:
+                stats["skipped"] += 1
             continue
-        if play_by_play and g["season"] >= FIRST_PBP_SEASON:
+        if wants_plays:
             todo.append(g)
         else:
             _write(con, {"game": score_only(g), "plays": [], "outs": [], "defensive": [], "players": {}})
@@ -151,24 +190,32 @@ def rebuild_fts(con: sqlite3.Connection) -> None:
 
 
 def sync_seasons(con: sqlite3.Connection, client: MlbClient, first: int, last: int, *,
-                 workers: int = 8, progress: Callable[[str], None] = print) -> None:
+                 workers: int = 8, progress: Callable[[str], None] = print,
+                 pbp_from: int = FIRST_PBP_SEASON) -> None:
+    """Index seasons `last` down to `first`. Final scores for all; plays from `pbp_from` on."""
+    floor = max(FIRST_PBP_SEASON, pbp_from)
     for season in range(last, first - 1, -1):      # newest first: recent questions work early
         b = season_bounds(client, season)
         if not b:
             continue
         start, end = b
-        row = con.execute("SELECT synced_through FROM sync_state WHERE season=?", (season,)).fetchone()
+        row = con.execute("SELECT synced_through, pbp FROM sync_state WHERE season=?", (season,)).fetchone()
+        wants_plays = season >= floor
+        upgrade = wants_plays and not (row and row[1])    # this season's plays haven't been fetched yet
         needs_backfill = con.execute("SELECT 1 FROM games WHERE season = ? AND league IS NULL LIMIT 1",
                                      (season,)).fetchone()
-        if row and not needs_backfill:  # resume after what was already indexed
+        if row and not needs_backfill and not upgrade:    # resume after what was already indexed
             start = max(start, date.fromisoformat(row[0]) - timedelta(days=2))
         if start > cutoff_date():
             continue
-        progress(f"Season {season}: {start} → {min(end, cutoff_date())}")
-        stats = sync_range(con, client, start, end, workers=workers, progress=progress)
+        kind = "plays + scores" if wants_plays else "scores"
+        progress(f"Season {season} ({kind}): {start} → {min(end, cutoff_date())}")
+        stats = sync_range(con, client, start, end, workers=workers, progress=progress,
+                           pbp_from=pbp_from, upgrade=upgrade)
         through = min(end, cutoff_date())
         if stats["failed"] == 0:
-            con.execute("INSERT OR REPLACE INTO sync_state VALUES (?, ?)", (season, through.isoformat()))
+            con.execute("INSERT OR REPLACE INTO sync_state VALUES (?, ?, ?)",
+                        (season, through.isoformat(), 1 if (wants_plays or (row and row[1])) else 0))
             con.commit()
         progress(f"  done: {stats}")
     rebuild_fts(con)
@@ -176,7 +223,7 @@ def sync_seasons(con: sqlite3.Connection, client: MlbClient, first: int, last: i
 
 def sync_recent(con: sqlite3.Connection, client: MlbClient, days: int = 7, **kw) -> dict:
     end = cutoff_date()
-    stats = sync_range(con, client, end - timedelta(days=days), end, **kw)
+    stats = sync_range(con, client, end - timedelta(days=days), end, pbp_from=season_of(end), **kw)
     rebuild_fts(con)
     return stats
 

@@ -171,6 +171,9 @@ class EventSearch:
         pl = lambda n, o, m: o if n == 1 else m
 
         if total == 0:
+            if not score_level and cov["first_season"] > FIRST_PBP_SEASON:
+                notes.append(f"Play-by-play is indexed from {cov['first_season']} on. To search back to "
+                             f"{FIRST_PBP_SEASON}, restart with `--history full` (or `./run.sh --history full`).")
             return Answer(f"I couldn't find any {many}{where} in the games I can search.", kind="notice",
                           title="No results", footnote=foot, notes=notes)
 
@@ -207,7 +210,7 @@ class EventSearch:
                              f"earlier one may exist.")
             if date.fromisoformat(last_day) < self.cutoff - timedelta(days=7):
                 notes.append(f"The index is behind (it stops {pretty_date(last_day)}), so a more recent one may "
-                             f"exist. Run `python -m mlbasker sync` to catch up.")
+                             f"exist. Run `python -m mlbasker update` to catch up.")
             return Answer(lead, cols, table, foot, title="Most recent" if mode == "last" else "First on record",
                           headline=pretty_date(r["date"]), subhead=f"{one[:1].upper() + one[1:]}{where}",
                           results=cards, notes=notes,
@@ -344,8 +347,9 @@ class EventSearch:
             return (f"The API has no play-by-play before {FIRST_PBP_SEASON}, so I can't search plays "
                     f"in {rng}. I can still give scores, standings, season stats and leaders for those years.")
         if (b is not None and b < lo) or (a is not None and a > hi):
-            return (f"My play-by-play index doesn't cover {rng} yet (it holds {lo}–{hi}). "
-                    f"Run `python -m mlbasker sync` to fill it in.")
+            return (f"My play-by-play index doesn't cover {rng} yet (it holds {lo}–{hi}). To go further back, "
+                    f"restart with `python -m mlbasker serve --history full` (or run "
+                    f"`python -m mlbasker sync --history {a or b or 1950}`).")
         return None
 
     @staticmethod
@@ -364,8 +368,8 @@ class EventSearch:
         if cov["first_season"] <= FIRST_PBP_SEASON:
             return (f"Searched {cov['games']:,} games with play-by-play "
                     f"({cov['first_season']}–{cov['last_season']}; the API has none earlier).")
-        return (f"Searched {cov['games']:,} indexed games ({cov['first_season']}–{cov['last_season']}); "
-                f"the index isn't fully built yet.")
+        return (f"Searched {cov['games']:,} games with play-by-play ({cov['first_season']}–{cov['last_season']}). "
+                f"Go back to {FIRST_PBP_SEASON} with `--history full`.")
 
     def _fts_ready(self) -> bool:
         try:

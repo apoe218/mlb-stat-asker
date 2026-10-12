@@ -1,0 +1,10 @@
+{
+  "name": "Stat Asker",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "postCreateCommand": "pip install --disable-pip-version-check -r requirements-dev.txt",
+  "postStartCommand": "nohup python -m mlbasker serve --host 0.0.0.0 --port 8000 > /tmp/stat-asker.log 2>&1 &",
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": { "label": "Stat Asker", "onAutoForward": "openBrowser", "visibility": "private" }
+  }
+}
