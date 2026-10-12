@@ -157,11 +157,11 @@ def test_led_the_league_is_a_leaders_question():
         {"player": {"fullName": "Roger Maris"}, "team": {"name": "New York Yankees"}, "stat": {"homeRuns": 61}}]}]}})
     ans = a.ask("who led the league in home runs in 1961")
     assert "Roger Maris" in ans.text and "61" in ans.text
-    assert "Before 1950" not in ans.footnote
+    assert not any("Before 1950" in n for n in ans.notes)
     # a 1927 season question carries the era caveat
     a, _ = asker({"stats": {"stats": [{"splits": [
         {"player": {"fullName": "Babe Ruth"}, "team": {"name": "New York Yankees"}, "stat": {"homeRuns": 60}}]}]}})
-    assert "Before 1950" in a.ask("who led the league in home runs in 1927").footnote
+    assert any("Before 1950" in n for n in a.ask("who led the league in home runs in 1927").notes)
 
 
 def _stat_params(client, suffix="/stats"):
@@ -177,7 +177,7 @@ def test_finished_season_uses_exact_season_totals_not_by_date():
     ans = a.ask("How many home runs did Babe Ruth hit in 1927?")
     p = _stat_params(client)[0]
     assert p["stats"] == "season" and p["season"] == 1927 and "startDate" not in p
-    assert "had **60 home runs**" in ans.text and "Before 1950" in ans.footnote
+    assert "had **60 home runs**" in ans.text and any("Before 1950" in n for n in ans.notes)
 
 
 def test_retired_or_19th_century_career_uses_career_totals():

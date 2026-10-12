@@ -3,93 +3,48 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MLB Stat Asker</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='44' fill='%23fff' stroke='%23c8102e' stroke-width='6'/%3E%3C/svg%3E">
-<style>
-:root{--bg:#f6f7f9;--panel:#fff;--ink:#14181f;--muted:#5b6573;--line:#e2e6ec;--accent:#0c2c56;--accent-ink:#fff;--user:#0c2c56;--user-ink:#fff;--quote:#eef2f8;--chip:#eaeff7}
-@media (prefers-color-scheme:dark){:root{--bg:#0e1116;--panel:#171b22;--ink:#e8ecf2;--muted:#97a1b0;--line:#272d37;--accent:#6aa0ff;--accent-ink:#0b0e13;--user:#24467f;--user-ink:#fff;--quote:#1d2430;--chip:#202734}}
-*{box-sizing:border-box}
-html,body{height:100%}
-body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;display:flex;flex-direction:column}
-header{padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel);display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
-header h1{font-size:1.05rem;margin:0}
-header .meta{color:var(--muted);font-size:.85rem}
-main{flex:1;overflow-y:auto;padding:16px}
-.wrap{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
-.msg{max-width:100%;padding:10px 14px;border-radius:14px;background:var(--panel);border:1px solid var(--line);overflow-wrap:anywhere}
-.msg.user{align-self:flex-end;background:var(--user);color:var(--user-ink);border-color:transparent;max-width:85%}
-.msg p{margin:.2em 0}
-.msg blockquote{margin:.5em 0;padding:.4em .8em;border-left:3px solid var(--accent);background:var(--quote);border-radius:4px}
-.msg .foot{margin-top:.5em;color:var(--muted);font-size:.8rem}
-.tablewrap{overflow-x:auto;margin-top:.5em}.tablewrap table{min-width:min(100%,560px)}
-table{border-collapse:collapse;font-size:.88rem;min-width:100%}
-th,td{padding:5px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-th{color:var(--muted);font-weight:600;white-space:nowrap}
-.chips{display:flex;flex-wrap:wrap;gap:8px}
-.chip{border:1px solid var(--line);background:var(--chip);color:var(--ink);border-radius:999px;padding:6px 12px;font:inherit;font-size:.88rem;cursor:pointer}
-.chip:hover,.chip:focus-visible{border-color:var(--accent);outline:none}
-form{display:flex;gap:8px;padding:12px 16px;border-top:1px solid var(--line);background:var(--panel)}
-form .row{max-width:860px;margin:0 auto;display:flex;gap:8px;width:100%}
-input{flex:1;font:inherit;padding:10px 14px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
-input:focus{outline:2px solid var(--accent);outline-offset:1px}
-button.send{font:inherit;padding:10px 18px;border-radius:10px;border:0;background:var(--accent);color:var(--accent-ink);cursor:pointer;font-weight:600}
-button.send:disabled{opacity:.5;cursor:default}
-.typing{color:var(--muted);font-style:italic}
-</style>
+<meta name="color-scheme" content="light dark">
+<title>Stat Asker</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
 </head>
-<body>
-<header>
-  <h1>⚾ MLB Stat Asker</h1>
-  <span class="meta" id="meta">loading…</span>
+<body class="home">
+
+<header class="top">
+  <a class="brand" href="/" aria-label="Stat Asker home">
+    <svg class="seam" viewBox="0 0 32 32" aria-hidden="true">
+      <circle cx="16" cy="16" r="14" fill="var(--panel)" stroke="var(--ink)" stroke-width="1.6"/>
+      <path d="M7.6 6.2c3.2 3 4.8 6.4 4.8 9.8s-1.6 6.8-4.8 9.8M24.4 6.2c-3.2 3-4.8 6.4-4.8 9.8s1.6 6.8 4.8 9.8"
+            fill="none" stroke="var(--brand)" stroke-width="1.6" stroke-linecap="round"/>
+    </svg>
+    <span class="brand-name">Stat Asker</span>
+  </a>
+
+  <form class="search" id="form" role="search" autocomplete="off">
+    <div class="field">
+      <svg class="icon lead" viewBox="0 0 24 24" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+      <input id="q" name="q" type="search" enterkeyhint="search" spellcheck="false" autocapitalize="off"
+             placeholder="Ask anything about baseball"
+             aria-label="Ask a baseball question" aria-controls="sugg" aria-autocomplete="list" aria-expanded="false">
+      <button type="button" class="clear" id="clear" aria-label="Clear search" hidden>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg>
+      </button>
+      <button type="submit" class="go" aria-label="Search">Ask</button>
+    </div>
+    <ul class="sugg" id="sugg" role="listbox" hidden></ul>
+  </form>
 </header>
-<main id="log"><div class="wrap" id="wrap"></div></main>
-<form id="f"><div class="row">
-  <input id="q" autocomplete="off" placeholder="Ask anything: stats, standings, scores, or baseball history…" aria-label="Question">
-  <button class="send" id="go">Ask</button>
-</div></form>
-<script>
-const wrap = document.getElementById('wrap'), log = document.getElementById('log');
-const q = document.getElementById('q'), go = document.getElementById('go');
-const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-function md(t){
-  const lines = esc(t).split('\n'); let out = '', inList = false;
-  for (let l of lines){
-    l = l.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/\*(.+?)\*/g,'<em>$1</em>').replace(/`(.+?)`/g,'<code>$1</code>');
-    if (/^&gt; /.test(l)) { if(inList){out+='</ul>';inList=false} out += '<blockquote>'+l.slice(5)+'</blockquote>'; }
-    else if (/^- /.test(l)) { if(!inList){out+='<ul>';inList=true} out += '<li>'+l.slice(2)+'</li>'; }
-    else { if(inList){out+='</ul>';inList=false} if(l.trim()) out += '<p>'+l+'</p>'; }
-  }
-  return out + (inList?'</ul>':'');
-}
-function add(cls, html){ const d = document.createElement('div'); d.className = 'msg '+cls; d.innerHTML = html; wrap.appendChild(d); log.scrollTop = log.scrollHeight; return d; }
-function render(a){
-  let h = md(a.text);
-  if (a.rows && a.rows.length){
-    h += '<div class="tablewrap"><table><thead><tr>'+a.columns.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead><tbody>'
-      + a.rows.map(r=>'<tr>'+r.map(c=>'<td>'+esc(c)+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>';
-  }
-  if (a.footnote) h += '<div class="foot">'+esc(a.footnote)+'</div>';
-  return h;
-}
-async function ask(text){
-  if (!text.trim()) return;
-  add('user', esc(text)); q.value = ''; go.disabled = true;
-  const t = add('', '<span class="typing">Looking that up…</span>');
-  try {
-    const r = await fetch('/api/ask', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({question:text})});
-    t.innerHTML = render(await r.json());
-  } catch(e){ t.innerHTML = 'Couldn’t reach the server.'; }
-  go.disabled = false; q.focus(); log.scrollTop = log.scrollHeight;
-}
-document.getElementById('f').addEventListener('submit', e => { e.preventDefault(); ask(q.value); });
-const examples = ['Who leads MLB in home runs?','Show me the standings','What was the score of the Brewers game last night?','Last time a game ended on a pickoff at first base','List all unassisted triple plays','How many walk-off home runs in 2009?'];
-const intro = add('', '<p>Ask about stats, standings, scores, or odd moments in baseball history. I only use games through <strong>yesterday</strong>.</p><div class="chips" id="chips"></div>');
-examples.forEach(x => { const b = document.createElement('button'); b.className='chip'; b.type='button'; b.textContent=x; b.onclick=()=>ask(x); intro.querySelector('#chips').appendChild(b); });
-fetch('/api/status').then(r=>r.json()).then(s=>{
-  const i = s.index || {}; const hist = i.games ? `${i.games.toLocaleString()} games indexed (${i.first_season}–${i.last_season})` : 'history index not built yet';
-  document.getElementById('meta').textContent = `Data through ${s.cutoff} · ${hist}` + (s.syncing ? ' · syncing…' : '');
-}).catch(()=>{ document.getElementById('meta').textContent = 'offline'; });
-q.focus();
-</script>
+
+<main id="main" aria-live="polite">
+  <section class="landing" id="landing">
+    <p class="tagline">Stats, standings, scores and baseball history — through yesterday.</p>
+    <div class="groups" id="groups"></div>
+  </section>
+  <section class="results" id="results" hidden></section>
+</main>
+
+<footer class="foot" id="foot"><span id="status">Loading…</span></footer>
+
+<script src="/static/app.js"></script>
 </body>
 </html>

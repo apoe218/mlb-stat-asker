@@ -8,7 +8,7 @@ from typing import Callable
 
 from ..client import BASE_11, MlbClient, TTL_LONG
 from ..cutoff import cutoff_date
-from .db import has_fts
+from .db import has_fts, refresh_game_totals
 from .extract import FEED_FIELDS, extract_game, score_only
 
 GAME_TYPES = "R,F,D,L,W"   # regular season + postseason rounds; no spring training / All-Star
@@ -93,6 +93,8 @@ def _write(con: sqlite3.Connection, ex: dict) -> None:
                         list(r.values()))
     for pid, name in ex["players"].items():
         con.execute("INSERT OR REPLACE INTO players (id, name) VALUES (?, ?)", (pid, name))
+    if ex["plays"]:
+        refresh_game_totals(con, g["game_pk"])
 
 
 def _clear_game(con: sqlite3.Connection, game_pk: int) -> None:

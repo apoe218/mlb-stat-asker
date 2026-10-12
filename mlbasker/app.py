@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .answer import Answer
 from .client import ApiError, MlbClient
 from .cutoff import cutoff_date
 from .engine import Asker
@@ -63,23 +64,39 @@ def create_app(*, feed: bool = True) -> FastAPI:
     lock = threading.Lock()        # one shared sqlite connection → serialise use
     asker = Asker(client=client, index=index)
 
-    @app.post("/api/ask")
-    def ask(req: AskRequest) -> dict:
+    def run(question: str) -> dict:
+        started = time.perf_counter()
         try:
             with lock:
-                ans = asker.ask(req.question)
+                ans = asker.ask(question)
             if state["syncing"] and ans.kind == "answer" and ans.footnote:
-                ans.footnote += " ⚠️ The history index is still being updated, so results may be incomplete."
-            return ans.to_dict()
+                ans.notes.append("The history index is still being updated, so results may be incomplete.")
+            out = ans.to_dict()
         except ApiError as e:
-            return {"text": f"The MLB API didn't respond: {e}", "columns": [], "rows": [],
-                    "footnote": "", "kind": "error"}
+            out = Answer(f"The MLB API didn't respond: {e}", kind="error", title="MLB API unavailable",
+                         notes=["Try again in a moment."]).to_dict()
+        out["query"] = question
+        out["took_ms"] = round((time.perf_counter() - started) * 1000)
+        return out
+
+    @app.get("/api/search")
+    def search(q: str = "") -> dict:
+        return run(q)
+
+    @app.post("/api/ask")
+    def ask(req: AskRequest) -> dict:
+        return run(req.question)
 
     @app.get("/api/status")
     def status() -> dict:
-        with lock:
-            cov = coverage(index)
-        return {"cutoff": cutoff_date().isoformat(), "index": cov, **state}
+        # a long-running search holds the lock; don't make the footer wait behind it
+        if lock.acquire(timeout=0.25):
+            try:
+                state["coverage"] = coverage(index)
+            finally:
+                lock.release()
+        return {"cutoff": cutoff_date().isoformat(), "index": state.get("coverage", {}),
+                "syncing": state["syncing"], "last_sync": state["last_sync"]}
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 

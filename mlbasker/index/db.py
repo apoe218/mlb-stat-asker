@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS games (
     walk_off_event TEXT
 );
 CREATE INDEX IF NOT EXISTS games_date ON games(date);
+CREATE INDEX IF NOT EXISTS games_season ON games(season, game_type);
+CREATE INDEX IF NOT EXISTS games_home ON games(home_id);
+CREATE INDEX IF NOT EXISTS games_away ON games(away_id);
 
 CREATE TABLE IF NOT EXISTS plays (
     game_pk INTEGER NOT NULL,
@@ -40,8 +43,9 @@ CREATE TABLE IF NOT EXISTS plays (
     PRIMARY KEY (game_pk, idx)
 );
 CREATE INDEX IF NOT EXISTS plays_event ON plays(event_type);
-CREATE INDEX IF NOT EXISTS plays_batter ON plays(batter_id);
-CREATE INDEX IF NOT EXISTS plays_pitcher ON plays(pitcher_id);
+CREATE INDEX IF NOT EXISTS plays_batter_ev ON plays(batter_id, event_type);
+CREATE INDEX IF NOT EXISTS plays_pitcher_ev ON plays(pitcher_id, event_type);
+CREATE INDEX IF NOT EXISTS plays_last ON plays(game_pk) WHERE is_last = 1;
 
 -- one row per multi-out defensive play (double plays and up)
 CREATE TABLE IF NOT EXISTS defensive_plays (
@@ -67,6 +71,22 @@ CREATE TABLE IF NOT EXISTS outs (
 CREATE INDEX IF NOT EXISTS outs_event ON outs(event_type);
 CREATE INDEX IF NOT EXISTS outs_game ON outs(game_pk, play_idx);
 
+-- per-player-per-game totals, derived from `plays` (cycles and single-game records read these)
+CREATE TABLE IF NOT EXISTS batter_games (
+    game_pk INTEGER NOT NULL, batter_id INTEGER NOT NULL, batter TEXT,
+    singles INTEGER NOT NULL, doubles INTEGER NOT NULL, triples INTEGER NOT NULL,
+    homers INTEGER NOT NULL, hits INTEGER NOT NULL,
+    PRIMARY KEY (game_pk, batter_id)
+);
+CREATE INDEX IF NOT EXISTS batter_games_hr ON batter_games(homers) WHERE homers >= 2;
+CREATE INDEX IF NOT EXISTS batter_games_hits ON batter_games(hits) WHERE hits >= 4;
+CREATE TABLE IF NOT EXISTS pitcher_games (
+    game_pk INTEGER NOT NULL, pitcher_id INTEGER NOT NULL, pitcher TEXT,
+    strikeouts INTEGER NOT NULL, walks INTEGER NOT NULL,
+    PRIMARY KEY (game_pk, pitcher_id)
+);
+CREATE INDEX IF NOT EXISTS pitcher_games_so ON pitcher_games(strikeouts) WHERE strikeouts >= 8;
+
 CREATE TABLE IF NOT EXISTS players (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL
 );
@@ -77,11 +97,43 @@ CREATE TABLE IF NOT EXISTS sync_state (
 """
 
 
+STRIKEOUTS = "('strikeout','strike_out','strikeout_double_play','strikeout_triple_play')"
+
+_BATTER_SQL = f"""
+    INSERT OR REPLACE INTO batter_games
+    SELECT game_pk, batter_id, MAX(batter),
+           COALESCE(SUM(event_type='single'), 0), COALESCE(SUM(event_type='double'), 0),
+           COALESCE(SUM(event_type='triple'), 0), COALESCE(SUM(event_type='home_run'), 0),
+           COALESCE(SUM(event_type IN ('single','double','triple','home_run')), 0)
+    FROM plays WHERE batter_id IS NOT NULL {{where}} GROUP BY game_pk, batter_id"""
+_PITCHER_SQL = f"""
+    INSERT OR REPLACE INTO pitcher_games
+    SELECT game_pk, pitcher_id, MAX(pitcher),
+           COALESCE(SUM(event_type IN {STRIKEOUTS}), 0), COALESCE(SUM(event_type IN ('walk','intent_walk')), 0)
+    FROM plays WHERE pitcher_id IS NOT NULL {{where}} GROUP BY game_pk, pitcher_id"""
+
+
+def refresh_game_totals(con: sqlite3.Connection, game_pk: int | None = None) -> None:
+    """(Re)build per-game batter/pitcher totals for one game, or for everything."""
+    where, params = ("AND game_pk = ?", (game_pk,)) if game_pk is not None else ("", ())
+    if game_pk is not None:
+        con.execute("DELETE FROM batter_games WHERE game_pk = ?", params)
+        con.execute("DELETE FROM pitcher_games WHERE game_pk = ?", params)
+    con.execute(_BATTER_SQL.format(where=where), params)
+    con.execute(_PITCHER_SQL.format(where=where), params)
+
+
 def _migrate(con: sqlite3.Connection) -> None:
-    """Add columns introduced after a database was first created."""
+    """Bring a database built by an older version up to date (columns, derived tables)."""
     cols = {r[1] for r in con.execute("PRAGMA table_info(games)")}
     if cols and "league" not in cols:
         con.execute("ALTER TABLE games ADD COLUMN league TEXT")
+    con.execute("DROP INDEX IF EXISTS plays_batter")      # superseded by plays_batter_ev
+    con.execute("DROP INDEX IF EXISTS plays_pitcher")
+    have_plays = con.execute("SELECT 1 FROM plays LIMIT 1").fetchone()
+    if have_plays and not con.execute("SELECT 1 FROM batter_games LIMIT 1").fetchone():
+        refresh_game_totals(con)       # one-time, from the plays already stored (no re-crawl)
+        con.commit()
 
 
 def connect(path: Path | str | None = None) -> sqlite3.Connection:
@@ -92,6 +144,8 @@ def connect(path: Path | str | None = None) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA cache_size=-131072")          # ~128 MB page cache
+    con.execute("PRAGMA mmap_size=536870912")
     con.executescript(SCHEMA)
     _migrate(con)
     try:

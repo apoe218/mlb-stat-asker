@@ -15,24 +15,32 @@ from dataclasses import dataclass, field
 class Filters:
     season_from: int | None = None
     season_to: int | None = None
+    date_from: str | None = None          # inclusive window start, YYYY-MM-DD
     date_to: str | None = None            # inclusive cutoff, YYYY-MM-DD
     game_types: list[str] | None = None   # None = everything indexed
     team_ids: list[int] = field(default_factory=list)
     home_only: bool = False               # teams must be the home side (walk-off winners)
+    team_result: str | None = None        # "win" / "loss": the named team won / lost the game
+    team_role: str | None = None          # no-hitters: "victim" (was no-hit) / "thrower" (its pitchers did it)
     player_ids: list[int] = field(default_factory=list)
     player_names: list[str] = field(default_factory=list)
 
     def player_clause(self, a: str = "p", use_names: bool = False) -> tuple[str, list]:
-        """Plays the player took part in as batter/pitcher, or is named in the play text."""
+        """Plays the player took part in as batter/pitcher, or is named in the play text.
+
+        Written as a UNION of two index lookups: `batter_id IN (..) OR pitcher_id IN (..)` makes
+        SQLite scan every play (minutes on a 12M-row table).
+        """
         if not self.player_ids:
             return "", []
         ph = ",".join("?" * len(self.player_ids))
-        parts = [f"{a}.batter_id IN ({ph})", f"{a}.pitcher_id IN ({ph})"]
+        sql = (f" AND {a}.rowid IN (SELECT rowid FROM plays WHERE batter_id IN ({ph}) "
+               f"UNION SELECT rowid FROM plays WHERE pitcher_id IN ({ph})")
         params: list = self.player_ids * 2
         for n in (self.player_names if use_names else []):
-            parts.append(f"{a}.description LIKE ?")
+            sql += f" UNION SELECT rowid FROM plays WHERE description LIKE ?"
             params.append(f"%{n}%")
-        return " AND (" + " OR ".join(parts) + ")", params
+        return sql + ")", params
 
     def game_clause(self, a: str = "g") -> tuple[str, list]:
         c, p = ["1=1"], []
@@ -40,6 +48,8 @@ class Filters:
             c.append(f"{a}.season >= ?"); p.append(self.season_from)
         if self.season_to is not None:
             c.append(f"{a}.season <= ?"); p.append(self.season_to)
+        if self.date_from:
+            c.append(f"{a}.date >= ?"); p.append(self.date_from)
         if self.date_to:
             c.append(f"{a}.date <= ?"); p.append(self.date_to)
         if self.game_types:
@@ -47,7 +57,12 @@ class Filters:
             p += self.game_types
         if self.team_ids:
             ph = ",".join("?" * len(self.team_ids))
-            if self.home_only:
+            if self.team_result in ("win", "loss"):
+                cmp_h, cmp_a = (">", "<") if self.team_result == "win" else ("<", ">")
+                c.append(f"(({a}.home_id IN ({ph}) AND {a}.home_score {cmp_h} {a}.away_score) OR "
+                         f"({a}.away_id IN ({ph}) AND {a}.away_score {cmp_h} {a}.home_score))")
+                p += self.team_ids * 2
+            elif self.home_only:
                 c.append(f"{a}.home_id IN ({ph})"); p += self.team_ids
             else:
                 c.append(f"({a}.away_id IN ({ph}) OR {a}.home_id IN ({ph}))")
@@ -138,9 +153,27 @@ PLAY_EVENTS = [
 
 COMMON_EVENTS = {"home run", "triple", "hit by pitch", "intentional walk", "balk", "wild pitch", "passed ball"}
 HISTORY_CUES = re.compile(r"last time|first time|most recent|latest|earliest|\bwhen\b|\blist\b|\ball\b|"
-                          r"every|occurrences?|instances?|\bwhich\b|games? (in which|where)|\bplays?\b")
+                          r"every|occurrences?|instances?|\bwhich\b|games? (in which|where)|\bplays?\b|"
+                          r"were hit|\btotal\b|combined|league[- ]?wide|in (all of )?(mlb|the majors|baseball)")
 
 ORDINAL_OUTS = {"double": 2, "triple": 3}
+
+
+def _score_spec(q: str) -> dict | None:
+    """'1-0 game', 'won 5-3', 'shutouts' → winner/loser run totals (None = any)."""
+    m = re.search(r"(?<![\d/.-])(\d{1,2})\s*[-–]\s*(\d{1,2})(?![\d/-])", q)
+    if m and re.search(r"\b(game|games|win|won|beat|lose|lost|score|scored|final|ended|shutout)\b", q) \
+            and not re.search(r"\b(19|20)\d\d\b\s*$", q):
+        a, b = int(m.group(1)), int(m.group(2))
+        spec = {"hi": max(a, b), "lo": min(a, b), "label": f"{max(a, b)}–{min(a, b)} game"}
+        spec["result"] = "win" if re.search(r"\b(win|won|wins|beat|defeat)", q) else \
+            "loss" if re.search(r"\b(lose|lost|loss|losses|fell|dropped)\b", q) else None
+        return spec
+    if re.search(r"\bshut[- ]?outs?\b", q) and not re.search(r"\b(era|pitcher|pitchers|leaders?)\b", q):
+        return {"hi": None, "lo": 0, "label": "shutout",
+                "result": "win" if re.search(r"\b(threw|pitched|won|win|wins)\b", q) else
+                "loss" if re.search(r"\b(lost|loss|losses|were shut out|got shut out)\b", q) else None}
+    return None
 
 
 def _threshold_record(q: str) -> dict | None:
@@ -193,6 +226,17 @@ def match(q: str) -> tuple[str, dict] | None:
                 return "walk_off", {"how": how, "label": label}
         return None   # "ended on <something we don't know>": say so rather than guess
 
+    # final scores: "last time a game ended 1-0", "Red Sox won 1-0", "shutouts"
+    sc = _score_spec(q)
+    if sc:
+        return "game_score", sc
+
+    # how many games were played
+    if re.search(r"how many (regular[- ]season |postseason |playoff )?games\b", q) and \
+            not re.search(r"\b(win|won|wins|lose|lost|loss|losses|ended|end|hit|strike|home run|homer|walk|no[- ]?hit|"
+                          r"back|ago|behind|ahead|over|under)\b", q):
+        return "game_count", {}
+
     # extremes
     if re.search(r"longest game", q):
         return "game_extreme", {"metric": "innings", "order": "DESC", "label": "innings"}
@@ -227,7 +271,21 @@ def match(q: str) -> tuple[str, dict] | None:
 
 # --- builders ---------------------------------------------------------------------------
 GAME_COLS = ("g.date AS date, g.game_pk AS game_pk, g.away AS away, g.home AS home, "
-             "g.away_score AS away_score, g.home_score AS home_score, g.league AS league")
+             "g.away_score AS away_score, g.home_score AS home_score, g.league AS league, "
+             "g.game_type AS game_type")
+
+
+HR_TEXT = ("%grand slam%", "%inside-the-park%")     # these only ever occur on home runs
+
+
+def _play_cond(how: tuple, alias: str = "p") -> tuple[str, list]:
+    kind, val = how
+    if kind == "types":
+        ph = ",".join("?" * len(val))
+        return f"{alias}.event_type IN ({ph})", list(val)
+    if val in HR_TEXT:   # lets SQLite use the event_type index instead of scanning 12M descriptions
+        return f"{alias}.event_type = 'home_run' AND {alias}.description LIKE ?", [val]
+    return f"{alias}.description LIKE ?", [val]
 
 
 def _in(values: list[str]) -> tuple[str, list]:
@@ -291,21 +349,48 @@ def build(entry: str, spec: dict, f: Filters) -> tuple[str, list, str]:
         zero_home = f"g.home_hits = 0 AND g.home_innings_batted >= 9 {reach.format(r='g.home_reached')}"
         zero_away = f"g.away_hits = 0 AND g.away_innings_batted >= 9 {reach.format(r='g.away_reached')}"
         word = "perfect game" if spec["perfect"] else "no-hitter"
+        extra, ep = "", []
+        if f.team_ids and f.team_role in ("victim", "thrower"):
+            ph = ",".join("?" * len(f.team_ids))
+            # the side held hitless is the victim; the other side's pitchers are the throwers
+            vh, va = ("home_id", "away_id") if f.team_role == "victim" else ("away_id", "home_id")
+            extra = f" AND (({zero_home} AND g.{vh} IN ({ph})) OR ({zero_away} AND g.{va} IN ({ph})))"
+            ep = f.team_ids * 2
         sql = (f"SELECT {GAME_COLS}, NULL AS inning, NULL AS half, "
                f"CASE WHEN {zero_home} THEN g.home || ' were held hitless by ' || g.away "
                f"ELSE g.away || ' were held hitless by ' || g.home END || ' ({word})' AS detail "
-               f"FROM games g WHERE g.has_pbp = 1 AND (({zero_home}) OR ({zero_away})) AND {gc}")
-        return sql, gp, ""
+               f"FROM games g WHERE g.has_pbp = 1 AND (({zero_home}) OR ({zero_away})) AND {gc}{extra}")
+        return sql, gp + ep, ""
 
     if entry == "cycle":
+        pid, pp = "", []
+        if f.player_ids:
+            pid = f" AND b.batter_id IN ({','.join('?' * len(f.player_ids))})"
+            pp = list(f.player_ids)
+        sql = (f"SELECT {GAME_COLS}, NULL AS inning, NULL AS half, b.batter || ' hit for the cycle' AS detail "
+               "FROM batter_games b JOIN games g ON g.game_pk = b.game_pk "
+               f"WHERE b.singles >= 1 AND b.doubles >= 1 AND b.triples >= 1 AND b.homers >= 1 AND {gc}{pid}")
+        return sql, gp + pp, ""
+
+    if entry == "game_count":
+        sql = (f"SELECT {GAME_COLS}, NULL AS inning, NULL AS half, '' AS detail FROM games g "
+               f"WHERE g.home_score IS NOT NULL AND {gc}")
+        return sql, gp, ""
+
+    if entry == "game_score":
+        conds, params = ["g.home_score IS NOT NULL", gc], list(gp)
+        if spec["hi"] is not None:
+            conds.append("MAX(g.away_score, g.home_score) = ? AND MIN(g.away_score, g.home_score) = ?")
+            params += [spec["hi"], spec["lo"]]
+        else:
+            conds.append("MIN(g.away_score, g.home_score) = ? AND g.away_score != g.home_score")
+            params.append(spec["lo"])
         sql = (f"SELECT {GAME_COLS}, NULL AS inning, NULL AS half, "
-               "p.batter || ' hit for the cycle' AS detail "
-               "FROM plays p JOIN games g ON g.game_pk = p.game_pk "
-               f"WHERE {gc}{player_sql} "
-               "GROUP BY p.game_pk, p.batter_id "
-               "HAVING SUM(p.event_type='single') >= 1 AND SUM(p.event_type='double') >= 1 "
-               "AND SUM(p.event_type='triple') >= 1 AND SUM(p.event_type='home_run') >= 1")
-        return sql, gp + player_p, ""
+               "CASE WHEN g.away_score > g.home_score THEN g.away ELSE g.home END || ' beat ' || "
+               "CASE WHEN g.away_score > g.home_score THEN g.home ELSE g.away END || ' ' || "
+               "MAX(g.away_score, g.home_score) || '–' || MIN(g.away_score, g.home_score) AS detail "
+               f"FROM games g WHERE {' AND '.join(conds)}")
+        return sql, params, ""
 
     if entry == "game_extreme":
         mn = f" AND g.innings >= {int(spec['min'])}" if spec.get("min") else ""
@@ -318,33 +403,28 @@ def build(entry: str, spec: dict, f: Filters) -> tuple[str, list, str]:
 
     if entry == "single_game_record":
         stat = spec["stat"]
-        if stat == "strikeouts":
-            who, w = "p.pitcher_id, p.pitcher", "p.event_type IN ('strikeout','strike_out','strikeout_double_play','strikeout_triple_play')"
-            role = "struck out"
-        elif stat == "walks":
-            who, w = "p.pitcher_id, p.pitcher", "p.event_type IN ('walk','intent_walk')"
-            role = "walked"
-        elif stat == "home runs":
-            who, w = "p.batter_id, p.batter", "p.event_type = 'home_run'"
-            role = "home runs"
-        else:  # hits
-            who, w = "p.batter_id, p.batter", "p.event_type IN ('single','double','triple','home_run')"
-            role = "hits"
-        name = who.split(", ")[1]
-        sql = (f"SELECT {GAME_COLS}, NULL AS inning, NULL AS half, COUNT(*) AS metric, "
-               f"{name} || ': ' || COUNT(*) || ' {role}' AS detail "
-               "FROM plays p JOIN games g ON g.game_pk = p.game_pk "
-               f"WHERE {w} AND {gc}{player_sql} GROUP BY p.game_pk, {who.split(', ')[0]}")
-        if spec.get("min"):      # "a pitcher struck out 20" → chronological, so last/first/count work
-            return (f"SELECT * FROM ({sql}) WHERE metric >= ?", gp + player_p + [spec["min"]], "")
-        return sql, gp + player_p, "metric DESC, date DESC"
+        table, idcol, namecol, col, noun = {
+            "strikeouts": ("pitcher_games", "pitcher_id", "pitcher", "strikeouts", "struck out"),
+            "walks": ("pitcher_games", "pitcher_id", "pitcher", "walks", "walked"),
+            "home runs": ("batter_games", "batter_id", "batter", "homers", "home runs"),
+            "hits": ("batter_games", "batter_id", "batter", "hits", "hits"),
+        }[stat]
+        pid, pp = "", []
+        if f.player_ids:
+            pid = f" AND t.{idcol} IN ({','.join('?' * len(f.player_ids))})"
+            pp = list(f.player_ids)
+        floor = spec.get("min") or 2
+        sql = (f"SELECT {GAME_COLS}, NULL AS inning, NULL AS half, t.{col} AS metric, "
+               f"t.{namecol} || ': ' || t.{col} || ' {noun}' AS detail "
+               f"FROM {table} t JOIN games g ON g.game_pk = t.game_pk "
+               f"WHERE t.{col} >= ? AND {gc}{pid}")
+        params = [floor] + gp + pp
+        if spec.get("min"):   # "a pitcher struck out 20" → chronological, so last/first/count work
+            return sql, params, ""
+        return sql, params, "metric DESC, date DESC"
 
     if entry == "play_event":
-        kind, val = spec["how"]
-        if kind == "types":
-            ph, tp = _in(val); cond, cp = f"p.event_type IN {ph}", tp
-        else:
-            cond, cp = "p.description LIKE ?", [val]
+        cond, cp = _play_cond(spec["how"])
         sql = (f"SELECT {GAME_COLS}, p.inning AS inning, p.half AS half, p.description AS detail "
                "FROM plays p JOIN games g ON g.game_pk = p.game_pk "
                f"WHERE {cond} AND {gc}{player_sql}")

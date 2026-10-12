@@ -66,6 +66,7 @@ class Entities:
         self._aliases: list[tuple[str, Team]] | None = None
         self._pcache: dict[str, tuple[int, str]] | None = None
         self._era: dict[int, list[Team]] = {}
+        self.options: dict[str, list[Player]] = {}      # ambiguous token → candidate players
 
     # --- teams ------------------------------------------------------------------------
     def teams(self) -> list[Team]:
@@ -198,6 +199,7 @@ class Entities:
                     p = matches[0]
                 elif len(matches) > 1:
                     ambiguous.append(cand)
+                    self.options[cand] = matches[:4]
                     used = used.replace(c, " ")
                     continue
             if p and all(p.id != f.id for f in found):
@@ -217,10 +219,13 @@ class Entities:
                 actives = [m for m in self._from_api(tok) if m.active and
                            norm(m.name).split(" ")[-1] == norm(tok)]
                 if len(actives) == 1:
-                    found.append(actives[0])
-                    break
-                if len(actives) > 1:
+                    if all(actives[0].id != f.id for f in found):
+                        found.append(actives[0])
+                    if len(found) >= limit:
+                        break
+                elif len(actives) > 1:
                     ambiguous.append(tok)
+                    self.options[tok] = actives[:4]
         return found, ambiguous
 
 

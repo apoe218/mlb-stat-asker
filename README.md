@@ -1,6 +1,6 @@
 # mlb-stat-asker
 
-A personal, single-user web chat for asking MLB questions in plain English. Answers come from the
+A personal, single-user, search-engine-style page for asking MLB questions in plain English. Answers come from the
 public **MLB Stats API** (`statsapi.mlb.com`) and are always cut off at **yesterday** (US Eastern) —
 a game played today never shows up in an answer.
 
@@ -31,17 +31,36 @@ python -m mlbasker update                    # index just the last week
 python -m mlbasker status                    # cutoff date + index coverage
 ```
 
+The first start after upgrading an older index runs a one-time migration (about 30 s on a 4 GB
+index) that adds indexes and small per-game tables; history questions then answer in well under a
+second.
+
 Files live under `data/` (git-ignored): `plays.sqlite` (index) and `cache/` (short-lived API cache).
 Override with `MLBASKER_DB` and `MLBASKER_CACHE`.
+
+## The interface
+
+A single search box, like a search engine. Answers appear as a card: the answer itself in large
+type, a one-line description, stat tiles or a table, and any caveats as a highlighted note. History
+searches list each matching game as a result with the date, matchup and the play. **Related
+searches** under each answer let you pivot (last → first → list all → how many).
+
+- Every search has its own URL (`/?q=…`), so back/forward and bookmarks work.
+- Autocomplete mixes your recent searches with example questions; `↑ ↓ Enter` to pick, `/` to
+  focus the box from anywhere, `Esc` to clear.
+- Light and dark themes follow your system; it works on a phone.
 
 ## What you can ask
 
 **Live lookups** (straight from the API, capped at yesterday)
 
 - *How many home runs does Aaron Judge have this season?* · *Shohei Ohtani's ERA* · *Judge career home runs*
+- *Judge vs Ohtani* (side-by-side, better stat marked) · *Paul Skenes strikeouts in April* · *Judge HR last 14 days*
 - *Who leads MLB in ERA?* · *Top 5 in stolen bases in 2025* · *Home run leaders for the Cubs*
 - *Show me the standings* · *How are the Dodgers doing?*
-- *What was the score of the Brewers game last night?* · *Did the Dodgers win on Oct 5?*
+- *What was the score of the Brewers game last night?* · *Did the Dodgers win on Oct 5?* · *Yankees vs Red Sox* (last meetings)
+- *Who won the 1956 World Series?* · *Last time the Cubs won the World Series* · *How many games did the Yankees win in 2019?*
+- *What is OPS?* (short definitions of common stats and terms)
 
 **Anything else — history search.** The API has no search endpoint, so the app indexes every
 finished game into SQLite and queries that:
@@ -51,6 +70,7 @@ finished game into SQLite and queries that:
 - *Last walk-off grand slam* · *Last time the Yankees had a walk-off in the postseason*
 - *When was the last perfect game?* · *How many no-hitters in 2012?* · *Who hit for the cycle in 2009?*
 - *Longest game since 1950* · *Highest-scoring game ever* · *Most strikeouts in a single game*
+- *Last time the Red Sox won a game 1-0* · *How many shutouts in 2019?* · *How many games were played in 1981?*
 - Quote any phrase to search play descriptions: `plays that say "bunt single"`
 
 Add filters in the question: a team (including old names like *Brooklyn Dodgers*), a player, a year
@@ -83,6 +103,11 @@ question ─► engine.Asker ─┬─► events.EventSearch ─► index/catalo
   no assists), not from the description text.
 
 ### Honest limits
+
+- Questions I don't have data for (game duration, awards, contracts, trades, injuries, odds, advanced
+  metrics like WAR) get a plain "not available" card, and "today / tonight / schedule" questions are
+  declined because the cutoff is yesterday. Splits (vs lefties, at home, with runners…) aren't
+  supported: you get the overall number plus a note saying so.
 
 - **Play-by-play starts in 1950** (verified by sampling: 1949 and earlier have none). "First time
   ever" for a play-level event therefore means first since 1950, and the answer says so. Every
